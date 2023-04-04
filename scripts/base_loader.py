@@ -5,16 +5,19 @@ import warnings
 
 import matplotlib.pyplot as plt
 import cv2
+import numpy as np
 
 import albumentations as A
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 class VCID_Dataset(Dataset):
-    def __init__(self, imgs, img_size, transform=None):
+    def __init__(self, imgs, surface_vols, CFG, mode="train", transform=None):
         self.imgs = imgs
-        self.img_size = img_size
+        self.surface_vols = surface_vols
+        self.img_size = CFG["img_size"]
         self.transform = transform
+        self.mode = mode
         self.get_all_grid()
         self.fileter_grid()
         self.get_flatten_grid()
@@ -47,13 +50,22 @@ class VCID_Dataset(Dataset):
     def get_flatten_grid(self):
         flatten_grid = []
         for img_idx, grid_indices in enumerate(self.grid_indices):
-            print(img_idx, grid_indices)
             for grid_idx in grid_indices:
                 grid_imgidx_list = [img_idx]
                 grid_imgidx_list.extend(grid_idx)
                 flatten_grid.append(grid_imgidx_list)
         self.flatten_grid = flatten_grid
         return self.flatten_grid
+
+    # def read_surface_vols(self, img_idx, grid_idx):
+    #     surface_vols = []
+    #     for i in range(6):
+    #         surface_path = os.path.join(CFG["INPUT_DIR"], self.mode, str(img_idx+1), "surface_volume", f"{i:02}.tif")
+    #         surface_vol = cv2.imread(surface_path, cv2.IMREAD_GRAYSCALE)
+    #         surface_vol = surface_vol[grid_idx[0]*self.img_size[0]:(grid_idx[0]+1)*self.img_size[0],
+    #                                     grid_idx[1]*self.img_size[1]:(grid_idx[1]+1)*self.img_size[1]]
+    #         surface_vols.append(surface_vol)
+    #     return surface_vols
 
     def __len__(self):
         return len(self.flatten_grid)
@@ -63,27 +75,57 @@ class VCID_Dataset(Dataset):
         img_idx = grid_idx[0]
         grid_idx = grid_idx[1:]
         img = self.imgs[img_idx]
+        surface_vol = self.surface_vols[img_idx]
         img = img[grid_idx[0]*self.img_size[0]:(grid_idx[0]+1)*self.img_size[0],
                     grid_idx[1]*self.img_size[1]:(grid_idx[1]+1)*self.img_size[1]]
-        
+        surface_vol_list = []
+        for surface_slice in surface_vol:
+            surface_slice = surface_slice[grid_idx[0]*self.img_size[0]:(grid_idx[0]+1)*self.img_size[0],
+                                            grid_idx[1]*self.img_size[1]:(grid_idx[1]+1)*self.img_size[1]]
+            surface_vol_list.append(surface_slice)
+        img = np.stack([img] + surface_vol_list, axis=0)
         if self.transform:
             img = self.transform(image=img)["image"]
-        
-        
         return img
 
+def read_surfacevol_all(img_idx, mode):
+    surface_vols = []
+    for i in range(10):
+        print("\r", f"reading idx:{i+1}", end="")
+        surface_path = os.path.join(CFG["INPUT_DIR"], mode, str(img_idx+1), "surface_volume", f"{i:02}.tif")
+        surface_vol = cv2.imread(surface_path, cv2.IMREAD_GRAYSCALE)
+        surface_vols.append(surface_vol)
+    print(f"  => read surface volume done. [{img_idx+1}]")
+    return surface_vols
+
 if __name__=="__main__":
-    import psutil
     BASE_DIR = "/working/"
     INPUT_DIR = os.path.join(BASE_DIR, "input")
     TRAIN_DIR = os.path.join(INPUT_DIR, "train")
-    mem_before = psutil.virtual_memory() 
-    print(mem_before.used)
-    mask_1 = cv2.imread(os.path.join(TRAIN_DIR, "1", "mask.png"))  
-    mask_2 = cv2.imread(os.path.join(TRAIN_DIR, "2", "mask.png"))
-    mask_3 = cv2.imread(os.path.join(TRAIN_DIR, "3", "mask.png"))
-    mem_after = psutil.virtual_memory() 
-    print(mem_after.used)
-    print(mem_after.used - mem_before.used)
+    CFG = {
+        "img_size": [256, 256],
+        "batch_size": 4,
+        "INPUT_DIR": INPUT_DIR,
+    }
+    mask_1 = cv2.imread(os.path.join(TRAIN_DIR, "1", "mask.png"), cv2.IMREAD_GRAYSCALE)  
+    mask_2 = cv2.imread(os.path.join(TRAIN_DIR, "2", "mask.png"), cv2.IMREAD_GRAYSCALE)
+    mask_3 = cv2.imread(os.path.join(TRAIN_DIR, "3", "mask.png"), cv2.IMREAD_GRAYSCALE)
     imgs = [mask_1, mask_2, mask_3]
-    dataset = VCID_Dataset(imgs, (256, 256))
+    print("read surface volume 1")
+    surface_vols_1 = read_surfacevol_all(0, "train")
+    print("read surface volume 2")
+    surface_vols_2 = read_surfacevol_all(1, "train")
+    print("read surface volume 3")
+    surface_vols_3 = read_surfacevol_all(2, "train")
+    print("dataset")
+    surface_vols = [surface_vols_1, surface_vols_2, surface_vols_3]
+    dataset = VCID_Dataset(imgs, surface_vols, CFG, mode="train")
+    print("dataloader")
+    dataloader = DataLoader(dataset, batch_size=CFG["batch_size"], shuffle=True, num_workers=2)
+    
+    print("check loader")
+    for batch_idx, imgs in enumerate(dataloader):
+        print("batch_idx: ", batch_idx)
+        print(imgs.shape)
+        if batch_idx >= 0:
+            break
