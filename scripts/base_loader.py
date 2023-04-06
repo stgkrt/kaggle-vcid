@@ -1,15 +1,10 @@
-import gc
-import glob
 import os
-import warnings
 
-import matplotlib.pyplot as plt
 import cv2
 import numpy as np
 
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
-from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 class VCID_Dataset(Dataset):
@@ -28,55 +23,40 @@ class VCID_Dataset(Dataset):
         self.surface_num = CFG["surface_num"]
         self.img_size = CFG["img_size"]
         self.transform = transform
+        
         # get imgs
         print("initializing dataset...")
         self.imgs = []
         for idx in self.data_idx_list:
             img_path = os.path.join(self.DATADIR, idx, "mask.png")
             img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-            # img = cv2.imread(img_path, 0)
             img = img.reshape(img.shape[0], img.shape[1], 1) # (h, w, channel=1)
-            # img = np.stack(img, axis=0) # (h, w, channel=1)
-            # print(img.shape)
-            # if self.imgs is None:
-            #     self.imgs = img.reshape(1, img.shape[0], img.shape[1], img.shape[2]) # (img_idx=1, h, w, channel=1)
-            #     # self.imgs = np.stack(img, axis=0) # (img_idx=1, h, w, channel=1)
-            #     print(self.imgs.shape, img.shape)
-            # else:
-            #     img = img.reshape(1, img.shape[0], img.shape[1], img.shape[2]) # (img_idx=1, h, w, channel=1)
-            #     # img = np.stack(img, axis=0) # (img_idx=1, h, w, channel=1)
-            #     self.imgs = np.concatenate([self.imgs, img], axis=0) # (img_idx=N, h, w, channel=1)
-            #     print(self.imgs.shape, img.shape)
             self.imgs.append(img)
-        # self.imgs = np.stack(self.imgs, axis=2)
-        # self.imgs = [cv2.imread(os.path.join(self.DATADIR, idx, "label.png"), cv2.IMREAD_GRAYSCALE) for idx in self.data_idx_list]
+        
+        # check imgs
         for img in self.imgs:
             assert img is not None, "img is None. data path is wrong"
-        print("read imgs done.", np.array(self.imgs).shape)
         # get and split surface
         self.surface_vols = self.read_surfacevols()
         for surface_vol in self.surface_vols:
             assert surface_vol is not None, "surface_vol is None. data path is wrong"
-        print("read surface volume done.", np.array(self.surface_vols).shape)
+       
         # split grid
         self.get_all_grid()
         self.fileter_grid()
         self.get_flatten_grid()
         print("split grid done.") 
+       
         # get label imgs
         if self.mode == "train" or self.mode == "valid":
             self.labels = []
             for idx in self.data_idx_list:
                 label_path = os.path.join(self.DATADIR, idx, "inklabels.png")
                 assert os.path.exists(label_path), f"{label_path} is not exist."
+                
+                # read label
                 label = cv2.imread(label_path, cv2.IMREAD_GRAYSCALE)
-                # label = np.stack(mask, axis=2)# (h, w, cahnnel=1)
                 label = label.reshape(label.shape[0], label.shape[1], 1) # (h, w, channel=1)
-                # if self.labels is None:
-                #     self.labels = np.stack(mask, axis=0) # (img_idx=1, h, w, channel=1)
-                # else:
-                #     label = np.stack(mask, axis=0) # (img_idx=1, h, w, channel=1)
-                #     self.labels = np.concatenate([self.masks, mask], axis=0) # (img_idx=N, h, w, channel=1)
                 self.labels.append(label)# 画像サイズがそれぞれ違うので単純にconcatできずlist化しているs
         print("initializing dataset done.")
 
@@ -89,17 +69,11 @@ class VCID_Dataset(Dataset):
                 print("\r", f"reading idx : {i+1}/{self.surface_num}", end="")
                 surface_path = os.path.join(self.DATADIR, img_idx, "surface_volume", f"{i:02}.tif")
                 surface_vol = cv2.imread(surface_path, cv2.IMREAD_GRAYSCALE)
-                # surface_vol = np.stack(surface_vol, axis=2) # (h, w, channel=1)
                 surface_vol = surface_vol.reshape(surface_vol.shape[0], surface_vol.shape[1], 1) # (h, w, channel=1)
                 if surface_vol_ is None:
                     surface_vol_ = surface_vol
                 else:
                     surface_vol_ = np.concatenate([surface_vol_, surface_vol], axis=2) # (h, w, channel=surface_num)
-            # if surface_vols is None:
-            #     surface_vols = np.stack(surface_vol_, axis=0) # (img_idx=1, h, w, channel=surface_num)
-            # else:
-            #     surface_vol_ = np.stack(surface_vol_, axis=0) # (img_idx=1, h, w, channel=surface_num)
-            #     surface_vols = np.concatenate([surface_vols, surface_vol_], axis=0)# (img_idx=N, h, w, channel=surface_num)
             surface_vols.append(surface_vol_)
             print(f"  => read surface volume done. [{img_idx}]")
         return surface_vols
@@ -148,32 +122,27 @@ class VCID_Dataset(Dataset):
         return len(self.flatten_grid)
 
     def __getitem__(self, idx):
+        # get indices
         grid_idx = self.flatten_grid[idx]
         img_idx = grid_idx[0]
         grid_idx = grid_idx[1:]
+        # get img & surface_vol
         img = self.imgs[img_idx]
-        print("img shape : ", img.shape)
         surface_vol = self.surface_vols[img_idx]
-        print("surface_vol shape : ", np.array(surface_vol).shape)
         img = self.get_grid_img(img, grid_idx)
         surface_vol = self.get_grid_img(surface_vol, grid_idx)
-        print("surface_vol shape : ", surface_vol.shape)
         assert surface_vol.shape[0]==img.shape[0] and surface_vol.shape[1]==img.shape[1] , "surface_vol_list shape is not same as img shape"
-        # surface_vol_list = []
-        # for surface_channel_idx in range(surface_vol.shape[2]):
-        #     surface_slice = surface_vol[:, :, surface_channel_idx]
-        #     print("surface_slice shape : ", surface_slice.shape)
-        #     surface_slice = self.get_grid_img(surface_slice, grid_idx)
-        #     assert surface_slice.shape == img.shape, "surface_slice shape is not same as img shape"
-        #     surface_vol_list.append(surface_slice)
-        img = np.concatenate([img, surface_vol], axis=2)
-        print("img shape : ", img.shape)
         
+        # concat img & surface_vol in channel axis
+        img = np.concatenate([img, surface_vol], axis=2)
+        
+        # transform
         if self.mode == "test":
             if self.transform:
                 img = self.transform(image=img)["image"]
             return img
         elif self.mode == "train" or self.mode=="valid":
+            # get label(segmentation mask)
             label = self.labels[img_idx]
             label = self.get_grid_img(label, grid_idx)
             print("label shape : ", label.shape)  
@@ -200,17 +169,6 @@ if __name__=="__main__":
         "VALID_IDX_LIST": ["3"],
         "TEST_IDX_LIST": ["a", "b"],
     }
-    # mask_1 = cv2.imread(os.path.join(TRAIN_DIR, "1", "mask.png"), cv2.IMREAD_GRAYSCALE)  
-    # mask_2 = cv2.imread(os.path.join(TRAIN_DIR, "2", "mask.png"), cv2.IMREAD_GRAYSCALE)
-    # mask_3 = cv2.imread(os.path.join(TRAIN_DIR, "3", "mask.png"), cv2.IMREAD_GRAYSCALE)
-    # imgs = [mask_1, mask_2, mask_3]
-    # print("read surface volume 1")
-    # surface_vols_1 = read_surfacevol_all(0, "train")
-    # print("read surface volume 2")
-    # surface_vols_2 = read_surfacevol_all(1, "train")
-    # print("read surface volume 3")
-    # surface_vols_3 = read_surfacevol_all(2, "train")
-    # surface_vols = [surface_vols_1, surface_vols_2, surface_vols_3]
 
     transforms = A.Compose([
         A.HorizontalFlip(p=0.5),
@@ -228,7 +186,6 @@ if __name__=="__main__":
     print("check loader")
     for batch_idx, (imgs, labels) in enumerate(dataloader):
         print("batch_idx: ", batch_idx)
-        # print(np.array(imgs).shape)
         print(imgs.shape)
         print(labels.shape)
         break
