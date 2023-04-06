@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 
 import albumentations as A
+from albumentations.pytorch import ToTensorV2
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
@@ -48,7 +49,7 @@ class VCID_Dataset(Dataset):
             #     print(self.imgs.shape, img.shape)
             self.imgs.append(img)
         # self.imgs = np.stack(self.imgs, axis=2)
-        # self.imgs = [cv2.imread(os.path.join(self.DATADIR, idx, "mask.png"), cv2.IMREAD_GRAYSCALE) for idx in self.data_idx_list]
+        # self.imgs = [cv2.imread(os.path.join(self.DATADIR, idx, "label.png"), cv2.IMREAD_GRAYSCALE) for idx in self.data_idx_list]
         for img in self.imgs:
             assert img is not None, "img is None. data path is wrong"
         print("read imgs done.", np.array(self.imgs).shape)
@@ -69,13 +70,13 @@ class VCID_Dataset(Dataset):
                 label_path = os.path.join(self.DATADIR, idx, "inklabels.png")
                 assert os.path.exists(label_path), f"{label_path} is not exist."
                 label = cv2.imread(label_path, cv2.IMREAD_GRAYSCALE)
-                # label = np.stack(label, axis=2)# (h, w, cahnnel=1)
+                # label = np.stack(mask, axis=2)# (h, w, cahnnel=1)
                 label = label.reshape(label.shape[0], label.shape[1], 1) # (h, w, channel=1)
                 # if self.labels is None:
-                #     self.labels = np.stack(label, axis=0) # (img_idx=1, h, w, channel=1)
+                #     self.labels = np.stack(mask, axis=0) # (img_idx=1, h, w, channel=1)
                 # else:
-                #     label = np.stack(label, axis=0) # (img_idx=1, h, w, channel=1)
-                #     self.labels = np.concatenate([self.labels, label], axis=0) # (img_idx=N, h, w, channel=1)
+                #     label = np.stack(mask, axis=0) # (img_idx=1, h, w, channel=1)
+                #     self.labels = np.concatenate([self.masks, mask], axis=0) # (img_idx=N, h, w, channel=1)
                 self.labels.append(label)# 画像サイズがそれぞれ違うので単純にconcatできずlist化しているs
         print("initializing dataset done.")
 
@@ -165,7 +166,8 @@ class VCID_Dataset(Dataset):
         #     surface_slice = self.get_grid_img(surface_slice, grid_idx)
         #     assert surface_slice.shape == img.shape, "surface_slice shape is not same as img shape"
         #     surface_vol_list.append(surface_slice)
-        img = np.stack([img] + surface_vol, axis=0)
+        img = np.concatenate([img, surface_vol], axis=2)
+        print("img shape : ", img.shape)
         
         if self.mode == "test":
             if self.transform:
@@ -173,8 +175,8 @@ class VCID_Dataset(Dataset):
             return img
         elif self.mode == "train" or self.mode=="valid":
             label = self.labels[img_idx]
-            print("label shape : ", np.array(label).shape)
             label = self.get_grid_img(label, grid_idx)
+            print("label shape : ", label.shape)  
             if self.transform:
                 transformed = self.transform(image=img, mask=label)
                 img = transformed["image"]
@@ -209,14 +211,24 @@ if __name__=="__main__":
     # print("read surface volume 3")
     # surface_vols_3 = read_surfacevol_all(2, "train")
     # surface_vols = [surface_vols_1, surface_vols_2, surface_vols_3]
-    
+
+    transforms = A.Compose([
+        A.HorizontalFlip(p=0.5),
+        A.VerticalFlip(p=0.5),
+        A.RandomRotate90(p=0.5),
+        A.ToFloat(max_value=255),
+        ToTensorV2(),
+    ])
+
     print("dataset")
-    dataset = VCID_Dataset(CFG, mode="train")
+    dataset = VCID_Dataset(CFG, mode="train", transform=transforms)
     print("dataloader")
     dataloader = DataLoader(dataset, batch_size=CFG["batch_size"], shuffle=True, num_workers=0)
-    
+ 
     print("check loader")
-    for batch_idx, imgs in enumerate(dataloader):
+    for batch_idx, (imgs, labels) in enumerate(dataloader):
         print("batch_idx: ", batch_idx)
-        print(np.array(imgs).shape)
+        # print(np.array(imgs).shape)
+        print(imgs.shape)
+        print(labels.shape)
         break
