@@ -36,7 +36,7 @@ warnings.filterwarnings('ignore')
 """
 Configureations
 """
-DEBUG = True 
+DEBUG = False
 EXP_NAME = "exp068"
 EXP_YAML_PAHT = os.path.join("/working", "output", EXP_NAME, "Config.yaml")
 # read yaml file to CFG
@@ -47,7 +47,7 @@ os.makedirs(os.path.join("/working", "output", EXP_NAME, "imgs"), exist_ok=True)
 CFG["EXP_NAME"] = EXP_NAME
 CFG["DEBUG"] = DEBUG
 CFG["OUTPUT_DIR"] = os.path.join("/working", "output", EXP_NAME)
-CFG["SUMMARY"] = "ex068: model:convnext, img size 512, not channel shuffle, bcewithlogits weight, Cycliclr, lr=1e-3, batchnorm, CLEHA"
+CFG["SUMMARY"] = "ex068: model:convnext, img size 512, not channel shuffle, bcewithlogits weight, Cycliclr, lr=1e-3, batchnorm, loss weights CLEHA"
 
 
 if DEBUG:
@@ -623,9 +623,9 @@ def training_loop(CFG):
         model = SegModel(CFG)
         model = model.to(device)
         valid_img_slice = []
-        # weights = torch.tensor([0.4]).cuda()
-        # criterion = torch.nn.BCEWithLogitsLoss(pos_weight=weights)
-        criterion = torch.nn.BCEWithLogitsLoss()
+        weights = torch.tensor([0.45]).cuda()
+        criterion = torch.nn.BCEWithLogitsLoss(pos_weight=weights)
+        # criterion = torch.nn.BCEWithLogitsLoss()
         optimizer = AdamW(model.parameters(), lr=CFG["lr"], weight_decay=CFG["weight_decay"], amsgrad=False)
         # scheduler = CosineAnnealingLR(optimizer, T_max=CFG["T_max"], eta_min=CFG["min_lr"], last_epoch=-1)
         scheduler = CyclicLR(optimizer, base_lr=CFG["base_lr"], max_lr=CFG["max_lr"],

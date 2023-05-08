@@ -47,7 +47,7 @@ warnings.filterwarnings('ignore')
 """
 Configureations
 """
-DEBUG = True 
+DEBUG = False
 EXP_NAME = "exp066"
 EXP_YAML_PAHT = os.path.join("/working", "output", EXP_NAME, "Config.yaml")
 # read yaml file to CFG
