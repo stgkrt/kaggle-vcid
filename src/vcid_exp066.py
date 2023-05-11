@@ -1,14 +1,3 @@
-"""
-ex065
-model:convnext
-
-bug fix masked_img   
-5-fold  
-img size 512
-output shape is half of input shape  
-not channel shuffle  
-bcewithlogits weight 0.4
-"""
 import gc
 import os
 import random
@@ -58,7 +47,7 @@ os.makedirs(os.path.join("/working", "output", EXP_NAME, "imgs"), exist_ok=True)
 CFG["EXP_NAME"] = EXP_NAME
 CFG["DEBUG"] = DEBUG
 CFG["OUTPUT_DIR"] = os.path.join("/working", "output", EXP_NAME)
-CFG["SUMMARY"] = "ex066: model:convnext, img size 512, not channel shuffle, bcewithlogits weight, Cycliclr, lr=1e-3, CLEHA"
+CFG["SUMMARY"] = "ex066: model:efficientnetb6, img size 512, not channel shuffle, bcewithlogits weight, CosineAnnealing, lr=1e-3, batch_norm, CLEHA"
 
 
 if DEBUG:
@@ -66,6 +55,20 @@ if DEBUG:
     CFG["folds"] = [0]
     CFG["SURFACE_LIST"] = [list(range(25, 35, 3))]
     CFG["slide_pos_list"] = [[0,0]]
+
+def init_logger(log_file=os.path.join(CFG["OUTPUT_DIR"], 'train.log')):
+    """Output Log."""
+    from logging import getLogger, INFO, FileHandler,  Formatter,  StreamHandler
+    logger = getLogger(__name__)
+    logger.setLevel(INFO)
+    handler1 = StreamHandler()
+    handler1.setFormatter(Formatter("%(message)s"))
+    handler2 = FileHandler(filename=log_file)
+    handler2.setFormatter(Formatter("%(message)s"))
+    logger.addHandler(handler1)
+    logger.addHandler(handler2)
+    return logger
+LOGGER = init_logger()
 
 """
 General Utils
@@ -85,7 +88,7 @@ if torch.cuda.is_available():
     device = torch.device('cuda')
 else:
     device = torch.device('cpu')
-print(f'Using device: {device}')
+LOGGER.info(f'Using device: {device}')
 
 def asMinutes(s):
     """Convert Seconds to Minutes."""
@@ -222,6 +225,7 @@ class Decoder(nn.Module):
         self.UpConv_0 = UpConv(CFG["channel_nums"][0], CFG["channel_nums"][1])
         self.UpConv_1 = UpConv(CFG["channel_nums"][1]*2, CFG["channel_nums"][2])
         self.UpConv_2 = UpConv(CFG["channel_nums"][2]*2, CFG["channel_nums"][3])
+        self.UpConv_3 = UpConv(CFG["channel_nums"][3]*2, CFG["channel_nums"][4])
     
     def forward(self, skip_connection_list):
         emb = self.UpConv_0(skip_connection_list[-1])
@@ -233,6 +237,9 @@ class Decoder(nn.Module):
         emb = self.UpConv_2(emb_cat)
         emb_cat = torch.cat([skip_connection_list[-4], emb], dim = 1)
         
+        emb = self.UpConv_3(emb_cat)
+        emb_cat = torch.cat([skip_connection_list[-5], emb], dim = 1)
+        
         return emb_cat
 
 class SegModel(nn.Module):
@@ -242,8 +249,9 @@ class SegModel(nn.Module):
         self.decoder = Decoder(CFG)
         self.head = nn.Sequential(
             nn.Conv2d(CFG["channel_nums"][-1]*2, CFG["out_channels"], kernel_size=1, stride=1, padding=0),
-            # nn.Sigmoid()
-        )
+            nn.BatchNorm2d(CFG["out_channels"]),
+            # nn.LayerNorm([1, CFG["img_size"][0]//2, CFG["img_size"][1]//2]),
+            )
     def forward(self, img):
         skip_connection_list = self.encoder(img)
         emb = self.decoder(skip_connection_list)
@@ -528,7 +536,7 @@ def train_fn(train_loader, model, criterion, epoch ,optimizer, scheduler, CFG):
         batch_time.update(time.time() - end)
         end = time.time()
         if batch_idx % CFG["print_freq"] == 0 or batch_idx == (len(train_loader)-1):
-            print('Epoch: [{0}][{1}/{2}] '
+            LOGGER.info('Epoch: [{0}][{1}/{2}] '
                     'Elapsed {remain:s} '
                     'Loss: {loss.val:.4f}({loss.avg:.4f}) '
                     .format(
@@ -571,7 +579,7 @@ def valid_fn(model, valid_loader, CFG, criterion=None):
         test_grid_idx.extend([[x_idx, y_idx] for x_idx, y_idx in zip(grid_idx[0].tolist(), grid_idx[1].tolist())])
 
         if (batch_idx % CFG["print_freq"] == 0 or batch_idx == (len(valid_loader)-1)) and (not criterion is None):
-            print('EVAL: [{0}/{1}] '
+            LOGGER.info('EVAL: [{0}/{1}] '
                 'Elapsed {remain:s} '
                 'Loss: {loss.val:.4f}({loss.avg:.4f}) '
                 .format(
@@ -646,7 +654,7 @@ def training_loop(CFG):
     slice_ave_auc_list = []
     slice_ave_score_threshold_list = []
     for fold in CFG["folds"]:
-        print(f"-- fold{fold} training start --") 
+        LOGGER.info(f"-- fold{fold} training start --") 
         # set model & learning fn
         model = SegModel(CFG)
         model = model.to(device)
@@ -655,10 +663,10 @@ def training_loop(CFG):
         # criterion = torch.nn.BCEWithLogitsLoss(pos_weight=weights)
         criterion = torch.nn.BCEWithLogitsLoss()
         optimizer = AdamW(model.parameters(), lr=CFG["lr"], weight_decay=CFG["weight_decay"], amsgrad=False)
-        # scheduler = CosineAnnealingLR(optimizer, T_max=CFG["T_max"], eta_min=CFG["min_lr"], last_epoch=-1)
-        scheduler = CyclicLR(optimizer, base_lr=CFG["base_lr"], max_lr=CFG["max_lr"],
-                            step_size_up=CFG["step_size_up"], step_size_down=CFG["step_size_down"], 
-                            cycle_momentum=False, mode='triangular2')
+        scheduler = CosineAnnealingLR(optimizer, T_max=CFG["T_max"], eta_min=CFG["min_lr"], last_epoch=-1)
+        # scheduler = CyclicLR(optimizer, base_lr=CFG["base_lr"], max_lr=CFG["max_lr"],
+        #                     step_size_up=CFG["step_size_up"], step_size_down=CFG["step_size_down"], 
+        #                     cycle_momentum=False, mode='triangular2')
         
         # training
         best_score = -np.inf
@@ -671,7 +679,7 @@ def training_loop(CFG):
         best_auc_epoch = -1
         valid_slice_ave = None       
         for slice_idx, surface_list in enumerate(CFG["SURFACE_LIST"]):
-            print("surface_list: ", surface_list)
+            LOGGER.info(f"surface_list: {surface_list}")
             # separate train/valid data 
             train_dirs = CFG["TRAIN_DIR_LIST"][fold]
             valid_dirs = CFG["VALID_DIR_LIST"][fold]
@@ -683,7 +691,7 @@ def training_loop(CFG):
                                         num_workers = CFG["num_workers"], pin_memory = True)
             for epoch in range(1, CFG["n_epoch"] + 1):
                 epochs_ = epoch + CFG["n_epoch"] * slice_idx
-                print(f'- epoch:{epochs_} -')
+                LOGGER.info(f'- epoch:{epochs_} -')
                 train_loss_avg = train_fn(train_loader, model, criterion, epochs_ ,optimizer, scheduler, CFG)
                 valid_targets, valid_preds, valid_grid_idx, valid_loss_avg = valid_fn(model, valid_loader, CFG, criterion)
                 
@@ -693,8 +701,8 @@ def training_loop(CFG):
                 valid_preds_binary = (valid_preds_img > valid_threshold).astype(np.uint8)
                 
                 elapsed = time.time() - start_time
-                print(f"\t epoch:{epochs_}, avg train loss:{train_loss_avg:.4f}, avg valid loss:{valid_loss_avg:.4f}")
-                print(f"\t score:{valid_score:.4f}(th={valid_threshold:3f}), auc={auc:4f}::: time:{elapsed:.2f}s")
+                LOGGER.info(f"\t epoch:{epochs_}, avg train loss:{train_loss_avg:.4f}, avg valid loss:{valid_loss_avg:.4f}")
+                LOGGER.info(f"\t score:{valid_score:.4f}(th={valid_threshold:3f}), auc={auc:4f}::: time:{elapsed:.2f}s")
                 if not CFG["DEBUG"]:
                     logging_metrics_epoch(CFG, fold, epoch, slice_idx, train_loss_avg, valid_loss_avg, valid_score, valid_threshold, auc)
                 scheduler.step()
@@ -707,8 +715,8 @@ def training_loop(CFG):
                     model_name = CFG["model_name"]
                     model_path = os.path.join(CFG["OUTPUT_DIR"], f'{model_name}_fold{fold}.pth')
                     torch.save(model.state_dict(), model_path) 
-                    print(f'Epoch {epochs_} - Save Best Score: {best_score:.4f}. Model is saved.')
-                    print("dice_list: ", dice_list)
+                    LOGGER.info(f'Epoch {epochs_} - Save Best Score: {best_score:.4f}. Model is saved.')
+                    LOGGER.info(f"dice_list: {dice_list}")
                     # save oof
                     save_and_plot_oof("score", fold, slice_idx, valid_preds_img, valid_targets_img, valid_preds_binary, CFG)
                 
@@ -719,7 +727,7 @@ def training_loop(CFG):
                     model_name = CFG["model_name"]
                     model_path = os.path.join(CFG["OUTPUT_DIR"], f'{model_name}_auc_fold{fold}.pth')
                     torch.save(model.state_dict(), model_path) 
-                    print(f'Epoch {epochs_} - Save Best AUC: {best_auc:.4f}. Model is saved.')
+                    LOGGER.info(f'Epoch {epochs_} - Save Best AUC: {best_auc:.4f}. Model is saved.')
                     # save oof
                     save_and_plot_oof("auc", fold, slice_idx, valid_preds_img, valid_targets_img, valid_preds_binary, CFG)
             # valid_img_slice.append(valid_preds_img)
@@ -736,10 +744,10 @@ def training_loop(CFG):
  
         valid_slice_binary = (valid_slice_ave > valid_sliceave_threshold).astype(np.uint8)
         save_and_plot_oof("average", fold, 999, valid_slice_ave, valid_targets_img, valid_slice_binary, CFG)
-        print(f'[fold{fold}] slice ave score:{valid_sliceave_score:.4f}(th={valid_sliceave_threshold:3f}), auc={ave_auc:4f}')
+        LOGGER.info(f'[fold{fold}] slice ave score:{valid_sliceave_score:.4f}(th={valid_sliceave_threshold:3f}), auc={ave_auc:4f}')
         
-        print(f'[fold{fold}] BEST Epoch {best_epoch} - Save Best Score:{best_score:.4f}. Best loss:{best_valloss:.4f}')
-        print(f'[fold{fold}] BEST AUC Epoch {best_auc_epoch} - Save Best Score:{best_auc:.4f}. Best loss:{best_auc_valloss:.4f}')
+        LOGGER.info(f'[fold{fold}] BEST Epoch {best_epoch} - Save Best Score:{best_score:.4f}. Best loss:{best_valloss:.4f}')
+        LOGGER.info(f'[fold{fold}] BEST AUC Epoch {best_auc_epoch} - Save Best Score:{best_auc:.4f}. Best loss:{best_auc_valloss:.4f}')
         
         best_score_list.append(best_score)
         best_threshold_list.append(best_threshold)
@@ -749,8 +757,8 @@ def training_loop(CFG):
         torch.cuda.empty_cache()
         
     for fold, (best_score, best_threshold, best_epoch) in enumerate(zip(best_score_list, best_threshold_list, best_epoch_list)):
-        print(f"fold[{fold}] BEST SCORE = {best_score:.4f} thr={best_threshold} (epoch={best_epoch})")
-        print(f"fold[{fold}] slice ave score:{slice_ave_score_list[fold]:.4f}(th={slice_ave_score_threshold_list[fold]:3f}), auc={slice_ave_auc_list[fold]:4f}")
+        LOGGER.info(f"fold[{fold}] BEST SCORE = {best_score:.4f} thr={best_threshold} (epoch={best_epoch})")
+        LOGGER.info(f"fold[{fold}] slice ave score:{slice_ave_score_list[fold]:.4f}(th={slice_ave_score_threshold_list[fold]:3f}), auc={slice_ave_auc_list[fold]:4f}")
     return best_score_list, best_threshold_list, best_epoch_list
 
 
@@ -759,7 +767,7 @@ def slide_inference_tta(CFG):
     start_time = time.time()
     slice_ave_score_list, slice_ave_auc_list, slice_ave_score_threshold_list = [], [], []
     for fold in CFG["folds"]:
-        print(f"-- fold{fold} slide inference start --")
+        LOGGER.info(f"-- fold{fold} slide inference start --")
  
         # set model & learning fn
         model = SegModel(CFG)
@@ -769,10 +777,10 @@ def slide_inference_tta(CFG):
         model = model.to(device)
         valid_img_slice = None
         for slice_idx, surface_list in enumerate(CFG["SURFACE_LIST"]):
-            print("surface_list: ", surface_list)
+            LOGGER.info(f"surface_list: {surface_list}")
             surface_volumes = None
             for slide_pos in CFG["slide_pos_list"]:
-                print("slide pos:", slide_pos)
+                LOGGER.info(f"slide pos:{slide_pos}")
                 valid_dirs = CFG["VALID_DIR_LIST"][fold]
                 for tta in tta_list:
                     valid_transforms = get_tta_aug(tta)
@@ -790,13 +798,13 @@ def slide_inference_tta(CFG):
                     save_and_plot_oof("slide", fold, slice_idx, valid_preds_img, valid_targets_img, valid_preds_binary, CFG) 
                     
                     elapsed = time.time() - start_time
-                    print(f"\t score:{valid_score:.4f}(th={valid_threshold:3f}), auc={auc:4f}::: time:{elapsed:.2f}s")
+                    LOGGER.info(f"\t score:{valid_score:.4f}(th={valid_threshold:3f}), auc={auc:4f}::: time:{elapsed:.2f}s")
                     # valid_img_slice.append(valid_preds_img)
                     if valid_img_slice is None:
                         valid_img_slice = valid_preds_img
                     else:
                         valid_img_slice += valid_preds_img
-        valid_img_slice /= len(["SURFACE_LIST"])*len(CFG["slide_pos_list"])
+        valid_img_slice /= (len(["SURFACE_LIST"])*len(CFG["slide_pos_list"])*len(tta_list))
         valid_sliceave_score, valid_sliceave_threshold, ave_auc, dice_list = calc_cv(valid_targets_img, valid_img_slice)
         
         slice_ave_score_list.append(valid_sliceave_score)
@@ -805,7 +813,7 @@ def slide_inference_tta(CFG):
 
         valid_slice_binary = (valid_img_slice > valid_sliceave_threshold).astype(np.uint8)
         save_and_plot_oof("average", fold, 555, valid_img_slice, valid_targets_img, valid_slice_binary, CFG)
-        print(f'[fold{fold}] slice ave score:{valid_sliceave_score:.4f}(th={valid_sliceave_threshold:3f}), auc={ave_auc:4f}')
+        LOGGER.info(f'[fold{fold}] slice ave score:{valid_sliceave_score:.4f}(th={valid_sliceave_threshold:3f}), auc={ave_auc:4f}')
          
         del model, valid_loader, valid_dataset, valid_preds_img, valid_targets_img, valid_preds_binary
         gc.collect()
@@ -819,11 +827,9 @@ def oof_score_check(CFG):
     for fold in CFG["folds"]:
         pred_path = os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_average_slice555_valid_pred_img.png")
         mask_path = os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_average_slice555_valid_targets_img.png")
-        print(pred_path)
+        LOGGER.info(pred_path)
         pred_img = cv2.imread(pred_path, cv2.IMREAD_GRAYSCALE)
         mask_img = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-        print(pred_img.shape)
-        print(mask_img.shape)
         pred_flatten_list.extend(pred_img.flatten())
         mask_flatten_list.extend(mask_img.flatten())
 
@@ -832,11 +838,11 @@ def oof_score_check(CFG):
     pred = np.array(pred_flatten_list)/255.
     for th in np.array(range(10, 100+1, 5)) / 100:
         dice = fbeta_numpy(mask, (pred >= th).astype(int), beta=0.5)
-        print(f"th={th:.2f}, dice={dice:.4f}")
+        LOGGER.info(f"th={th:.2f}, dice={dice:.4f}")
 
 def oofscore_log(CFG):
     for fold in CFG["folds"]:
-        print(f"fold[{fold}] slice ave score:{slice_ave_score_list[fold]:.4f}(th={slice_ave_score_threshold_list[fold]:3f}), auc={slice_ave_auc_list[fold]:4f}")
+        LOGGER.info(f"fold[{fold}] slice ave score:{slice_ave_score_list[fold]:.4f}(th={slice_ave_score_threshold_list[fold]:3f}), auc={slice_ave_auc_list[fold]:4f}")
         wandb.log({"OOF SCORE" : {f"slice average score":slice_ave_score_list[fold],
                                 f"slice average threshold":slice_ave_score_threshold_list[fold],
                                 f"slice_average auc":slice_ave_auc_list[fold],
@@ -844,7 +850,7 @@ def oofscore_log(CFG):
                                 }})
 
 if __name__=="__main__":
-    print(CFG)
+    LOGGER.info(CFG)
     if not CFG["DEBUG"]:
         WANDB_CONFIG = {'competition': 'vcid', '_wandb_kernel': 'taro'}
         os.environ["WANDB_SILENT"] = "true"

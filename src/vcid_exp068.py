@@ -36,7 +36,7 @@ warnings.filterwarnings('ignore')
 """
 Configureations
 """
-DEBUG = False
+DEBUG = False 
 EXP_NAME = "exp068"
 EXP_YAML_PAHT = os.path.join("/working", "output", EXP_NAME, "Config.yaml")
 # read yaml file to CFG
@@ -47,7 +47,7 @@ os.makedirs(os.path.join("/working", "output", EXP_NAME, "imgs"), exist_ok=True)
 CFG["EXP_NAME"] = EXP_NAME
 CFG["DEBUG"] = DEBUG
 CFG["OUTPUT_DIR"] = os.path.join("/working", "output", EXP_NAME)
-CFG["SUMMARY"] = "ex068: model:convnext, img size 512, not channel shuffle, bcewithlogits weight, Cycliclr, lr=1e-3, batchnorm, loss weights CLEHA"
+CFG["SUMMARY"] = "ex068: model:efficientnetb6, img size 512, not channel shuffle, bcewithlogits weight, CosineAnealing, lr=1e-3, loss weights, CLEHA"
 
 
 if DEBUG:
@@ -187,6 +187,23 @@ class UpConv(nn.Module):
         return x
 
 
+# 下に２層を使わない
+# class Decoder(nn.Module):
+#     def __init__(self):
+#         super().__init__()
+#         self.UpConv_0 = UpConv(CFG["channel_nums"][0], CFG["channel_nums"][1])
+#         self.UpConv_1 = UpConv(CFG["channel_nums"][1]*2, CFG["channel_nums"][2])
+#         self.UpConv_2 = UpConv(CFG["channel_nums"][2]*2, CFG["channel_nums"][2])
+    
+#     def forward(self, skip_connection_list):
+#         emb = self.UpConv_0(skip_connection_list[2]) # emb.shape = (None, 160, 14, 14)
+#         emb_cat = torch.cat([skip_connection_list[1], emb], dim = 1)
+        
+#         emb = self.UpConv_1(emb_cat)
+#         emb_cat = torch.cat([skip_connection_list[0], emb], dim = 1)
+        
+#         return emb_cat
+
 #下に1層を使わない
 class Decoder(nn.Module):
     def __init__(self, CFG):
@@ -194,6 +211,7 @@ class Decoder(nn.Module):
         self.UpConv_0 = UpConv(CFG["channel_nums"][0], CFG["channel_nums"][1])
         self.UpConv_1 = UpConv(CFG["channel_nums"][1]*2, CFG["channel_nums"][2])
         self.UpConv_2 = UpConv(CFG["channel_nums"][2]*2, CFG["channel_nums"][3])
+        self.UpConv_3 = UpConv(CFG["channel_nums"][3]*2, CFG["channel_nums"][4])
     
     def forward(self, skip_connection_list):
         emb = self.UpConv_0(skip_connection_list[-1])
@@ -205,6 +223,9 @@ class Decoder(nn.Module):
         emb = self.UpConv_2(emb_cat)
         emb_cat = torch.cat([skip_connection_list[-4], emb], dim = 1)
         
+        emb = self.UpConv_3(emb_cat)
+        emb_cat = torch.cat([skip_connection_list[-5], emb], dim = 1)
+        
         return emb_cat
 
 class SegModel(nn.Module):
@@ -214,7 +235,8 @@ class SegModel(nn.Module):
         self.decoder = Decoder(CFG)
         self.head = nn.Sequential(
             nn.Conv2d(CFG["channel_nums"][-1]*2, CFG["out_channels"], kernel_size=1, stride=1, padding=0),
-            nn.BatchNorm2d(CFG["out_channels"]),
+            # nn.BatchNorm2d(CFG["out_channels"]),
+            # nn.Sigmoid()
         )
     def forward(self, img):
         skip_connection_list = self.encoder(img)
@@ -627,10 +649,10 @@ def training_loop(CFG):
         criterion = torch.nn.BCEWithLogitsLoss(pos_weight=weights)
         # criterion = torch.nn.BCEWithLogitsLoss()
         optimizer = AdamW(model.parameters(), lr=CFG["lr"], weight_decay=CFG["weight_decay"], amsgrad=False)
-        # scheduler = CosineAnnealingLR(optimizer, T_max=CFG["T_max"], eta_min=CFG["min_lr"], last_epoch=-1)
-        scheduler = CyclicLR(optimizer, base_lr=CFG["base_lr"], max_lr=CFG["max_lr"],
-                            step_size_up=CFG["step_size_up"], step_size_down=CFG["step_size_down"], 
-                            cycle_momentum=False, mode='triangular2')
+        scheduler = CosineAnnealingLR(optimizer, T_max=CFG["T_max"], eta_min=CFG["min_lr"], last_epoch=-1)
+        # scheduler = CyclicLR(optimizer, base_lr=CFG["base_lr"], max_lr=CFG["max_lr"],
+        #                     step_size_up=CFG["step_size_up"], step_size_down=CFG["step_size_down"], 
+        #                     cycle_momentum=False, mode='triangular2')
         
         # training
         best_score = -np.inf
@@ -768,7 +790,7 @@ def slide_inference_tta(CFG):
                         valid_img_slice = valid_preds_img
                     else:
                         valid_img_slice += valid_preds_img
-        valid_img_slice /= len(["SURFACE_LIST"])*len(CFG["slide_pos_list"])
+        valid_img_slice /= len(["SURFACE_LIST"])*len(CFG["slide_pos_list"])*len(tta_list)
         valid_sliceave_score, valid_sliceave_threshold, ave_auc, dice_list = calc_cv(valid_targets_img, valid_img_slice)
         
         slice_ave_score_list.append(valid_sliceave_score)
