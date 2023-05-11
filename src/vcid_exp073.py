@@ -295,7 +295,7 @@ class VCID_Dataset(Dataset):
         self.surface_list = surface_list
         self.slide_pos = slide_pos
         self.transform = transform
-        # self.cleha = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        self.cleha = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
         # get imgs
         # print("initializing dataset...")
         self.imgs = []
@@ -347,7 +347,7 @@ class VCID_Dataset(Dataset):
                 # print("\r", f"reading idx : {read_idx+1}/{len(self.surface_list)}", end="")
                 surface_path = os.path.join(self.DATADIR, data_dir, "surface_volume", f"{surface_idx:02}.tif")
                 surface_vol = cv2.imread(surface_path, cv2.IMREAD_GRAYSCALE)
-                # surface_vol = self.cleha.apply(surface_vol)
+                surface_vol = self.cleha.apply(surface_vol)
                 surface_vol = surface_vol.reshape(surface_vol.shape[0], surface_vol.shape[1], 1) # (h, w, channel=1)
                 if surface_vol_ is None:
                     surface_vol_ = surface_vol
