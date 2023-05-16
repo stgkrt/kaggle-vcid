@@ -1,9 +1,12 @@
+
+
+# 1d-ex000
+
 import gc
 import os
 import random
 import time
 import math
-import yaml
 
 import cv2
 import numpy as np
@@ -13,6 +16,7 @@ import matplotlib.pyplot as plt
 import torch
 import torchvision
 import torch.nn as nn
+import torch.nn.functional as F
 import timm
 from torchvision.models.feature_extraction import create_feature_extractor
 import torchvision.transforms.functional as TF
@@ -28,34 +32,65 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, CosineAnnealingWarmResta
 
 # metric
 from sklearn.metrics import fbeta_score, roc_auc_score
+
 import wandb
+
 import warnings
 warnings.filterwarnings('ignore')
 
 
-"""
-Configureations
-"""
-DEBUG = False 
-EXP_NAME = "exp075"
-EXP_YAML_PAHT = os.path.join("/working", "output", EXP_NAME, "Config.yaml")
-# read yaml file to CFG
-with open(EXP_YAML_PAHT) as yaml_file:
-    CFG = yaml.load(yaml_file, Loader=yaml.FullLoader)
-os.makedirs(os.path.join("/working", "output", EXP_NAME, "imgs"), exist_ok=True)
+BASE_DIR = "/working/"
+INPUT_DIR = os.path.join(BASE_DIR, "input", "vesuvius-challenge-ink-detection")
+EXP_NAME = "exp1d000"
+CFG = dict(
+    DEBUG=True,
+    
+    # exp setting
+    EXP_CATEGORY="1d",
+    EXP_NAME=EXP_NAME,
+    
+    # model
+    model_name = "1dcnn",
+    img_size = [128, 128],
+    
+    # data
+    SURFACE_LIST = [list(range(30, 45, 1))],
+    SLIDE_LIST = [[0,0]],
+    RANDOM_SLIDE = True,
+     
+    # learning
+    folds = [0, 1, 2, 3, 4],
+    n_epoch = 15,
+    lr = 7.5e-4,
+    base_lr = 1e-3,
+    T_max = 10,
+    min_lr = 1e-8,
+    weight_decay = 1e-6,
+    batch_size = 16,
 
-CFG["EXP_NAME"] = EXP_NAME
-CFG["DEBUG"] = DEBUG
-CFG["OUTPUT_DIR"] = os.path.join("/working", "output", EXP_NAME)
-CFG["SUMMARY"] = f"{EXP_NAME}: model:efficientnetb6, grid img size 128, img size 512, not channel shuffle, bcewithlogits weight, CosineAnealing, lr=1e-3, loss weights 0.3, small grid, clahe"
-
-
-if DEBUG:
-    CFG["n_epoch"] = 1
+    # etc
+    print_freq = 1000,
+    num_workers =  0,
+    # directory
+    TRAIN_DIR = os.path.join(INPUT_DIR, "train"),
+    OUTPUT_DIR = os.path.join(BASE_DIR, "output", EXP_NAME),
+    
+    TRAIN_DIR_LIST = [["1", "2_0", "2_1", "2_2"], 
+                       ["1", "2_0", "2_1", "3"],
+                       ["1", "2_0",  "2_2", "3"],
+                       ["1", "2_1", "2_2", "3"],
+                       ["2_0", "2_1", "2_2", "3"],
+                       ],
+    VALID_DIR_LIST = [["3"], ["2_2"], ["2_1"], ["2_0"],["1"]],
+    
+    
+    random_seed=42, 
+)
+if CFG["DEBUG"]:
+    CFG["OUTPUT_DIR"] = os.path.join(BASE_DIR, "output", "debug")
+    CFG["SURFACE_LIST"] = [list(range(30, 45, 1))]
     CFG["folds"] = [0]
-    CFG["SURFACE_LIST"] = [list(range(25, 35, 3))]
-    CFG["slide_pos_list"] = [[0,0]]
-
+    CFG["n_epoch"] = 1    
 
 def init_logger(log_file=os.path.join(CFG["OUTPUT_DIR"], 'train.log')):
     """Output Log."""
@@ -71,12 +106,21 @@ def init_logger(log_file=os.path.join(CFG["OUTPUT_DIR"], 'train.log')):
     return logger
 LOGGER = init_logger()
 
+if not CFG["DEBUG"]:
+    WANDB_CONFIG = {'competition': 'vcid', '_wandb_kernel': 'taro'}
+    os.environ["WANDB_SILENT"] = "true"
+    wandb.init(project=WANDB_CONFIG["competition"], config=CFG, group=CFG["EXP_CATEGORY"], name=CFG["EXP_NAME"], reinit=True)
 
+def logging_metrics_epoch(CFG, fold, epoch, slice_idx,train_loss_avg, valid_loss_avg, score, threshold, auc_score):
+    wandb.log({f"train/fold{fold}": train_loss_avg,
+                f"valid/fold{fold}": valid_loss_avg,
+                f"score/fold{fold}":score,
+                f"score threshold/fold{fold}":threshold,
+                f"auc/fold{fold}":auc_score,
+                f"epoch/fold{fold}":epoch+slice_idx*CFG["n_epoch"],
+                })
 
-"""
-General Utils
-"""
-def seed_everything(seed=42):
+def seed_everything(seed=CFG["random_seed"]):
     #os.environ['PYTHONSEED'] = str(seed)
     np.random.seed(seed)
     random.seed(seed)
@@ -84,7 +128,7 @@ def seed_everything(seed=42):
     torch.cuda.manual_seed(seed)
     torch.backends.cudnn.deterministic =True
     torch.backends.cudnn.benchmark = False
-seed_everything(CFG["random_seed"])
+seed_everything()
 
 # device optimization
 if torch.cuda.is_available():
@@ -124,19 +168,6 @@ class AverageMeter(object):
         self.count += n
         self.avg = self.sum / self.count
 
-def logging_metrics_epoch(CFG, fold, epoch, slice_idx,train_loss_avg, valid_loss_avg, score, threshold, auc_score):
-    wandb.log({f"train/fold{fold}": train_loss_avg,
-                f"valid/fold{fold}": valid_loss_avg,
-                f"score/fold{fold}":score,
-                f"score threshold/fold{fold}":threshold,
-                f"auc/fold{fold}":auc_score,
-                f"epoch/fold{fold}":epoch+slice_idx*CFG["n_epoch"],
-                })
-
-
-"""
-SCORE UTILS
-"""
 def fbeta_numpy(targets, preds, beta=0.5, smooth=1e-5):
     y_true_count = targets.sum()
     ctp = preds[targets==1].sum()
@@ -173,110 +204,117 @@ def calc_fbeta_auc(mask, mask_pred):
 
 def calc_cv(mask_gt, mask_pred):
     best_dice, best_th, auc, dice_list = calc_fbeta_auc(mask_gt, mask_pred)
+
     return best_dice, best_th, auc, dice_list
 
 
-"""
-MODEL
-"""
-class Encoder(nn.Module):
-    def __init__(self, CFG):
+class VCID_1DNet(nn.Module):
+    def __init__(self, CFG_):
         super().__init__()
-        self.encoder = timm.create_model(CFG["model_name"], in_chans=CFG["inp_channels"], 
-                                         features_only=True, out_indices=CFG["out_indices"], pretrained=CFG["pretrained"])
-    def forward(self, img):
-        skip_connection_list = self.encoder(img)
-        return skip_connection_list
-
-class UpConv(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
-        self.bn1 = nn.BatchNorm2d(in_channels)
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size = 2, padding="same")
-        self.bn2 = nn.BatchNorm2d(out_channels)
-
+        channel = CFG_["img_size"][0]*CFG_["img_size"][1]
+        # data_length = len(CFG_["SURFACE_LIST"][0])
+        hdn = 32
+        self.conv1 = nn.Conv1d(channel, hdn, kernel_size=9, stride=1, padding=1)
+        self.bn1 = nn.BatchNorm1d(hdn)
+        self.do1 = nn.Dropout(0.2)
+        self.conv2 = nn.Conv1d(hdn, hdn*2, kernel_size=7, stride=1, padding=1)
+        self.bn2 = nn.BatchNorm1d(hdn*2)
+        self.do2 = nn.Dropout(0.2)
+        self.conv3 = nn.Conv1d(hdn*2, hdn*2, kernel_size=5, stride=1, padding=1)
+        self.bn3 = nn.BatchNorm1d(hdn*2)
+        self.do3 = nn.Dropout(0.2)
+        self.conv4 = nn.Conv1d(hdn*2, hdn*2, kernel_size=3, stride=1, padding=1)
+        self.bn4 = nn.BatchNorm1d(hdn*2)
+        self.do4 = nn.Dropout(0.2)
+        self.fc = nn.Linear(hdn*2, channel)
+        
     def forward(self, x):
-        x = self.up(x)
-        x = self.bn1(x)
-        x = self.conv(x)
-        x = self.bn2(x)
+        x = self.do1(F.relu(self.bn1(self.conv1(x))))
+        x = self.do2(F.relu(self.bn2(self.conv2(x))))
+        x = self.do3(F.relu(self.bn3(self.conv3(x))))
+        x = self.do4(F.relu(self.bn4(self.conv4(x))))
+        x = F.adaptive_avg_pool1d(x, 1).reshape(x.shape[0], -1)
+        x = self.fc(x)
         return x
+ 
 
-class Decoder(nn.Module):
-    def __init__(self, CFG):
-        super().__init__()
-        self.UpConv_0 = UpConv(CFG["channel_nums"][0], CFG["channel_nums"][1])
-        self.UpConv_1 = UpConv(CFG["channel_nums"][1]*2, CFG["channel_nums"][2])
-        self.UpConv_2 = UpConv(CFG["channel_nums"][2]*2, CFG["channel_nums"][3])
-        self.UpConv_3 = UpConv(CFG["channel_nums"][3]*2, CFG["channel_nums"][4])
-    
-    def forward(self, skip_connection_list):
-        emb = self.UpConv_0(skip_connection_list[-1])
-        emb_cat = torch.cat([skip_connection_list[-2], emb], dim = 1)
+# class VCID_1DNet(nn.Module):
+#     def __init__(self, CFG_):
+#         super().__init__()
+#         channel = CFG_["img_size"][0]*CFG_["img_size"][1]
+#         # data_length = len(CFG_["SURFACE_LIST"][0])
+#         hdn = 32
+#         self.conv1 = nn.Conv1d(channel, hdn, bias=False, kernel_size=9, stride=1, padding=1)
+#         # self.do1 = nn.Dropout(0.2)
+#         self.conv2 = nn.Conv1d(hdn, hdn*2, bias=False, kernel_size=7, stride=1, padding=1)
+#         # self.do2 = nn.Dropout(0.2)
+#         self.conv3 = nn.Conv1d(hdn*2, hdn*2, bias=False, kernel_size=5, stride=1, padding=1)
+#         # self.do3 = nn.Dropout(0.2)
+#         self.conv4 = nn.Conv1d(hdn*2, hdn*2, bias=False, kernel_size=3, stride=1, padding=1)
+#         self.do = nn.Dropout(0.2)
+#         self.pool = nn.MaxPool1d(2, stride=2)
+#         self.fc = nn.Linear(hdn*2, channel)
         
-        emb = self.UpConv_1(emb_cat)
-        emb_cat = torch.cat([skip_connection_list[-3], emb], dim = 1)
-        
-        emb = self.UpConv_2(emb_cat)
-        emb_cat = torch.cat([skip_connection_list[-4], emb], dim = 1)
-        
-        emb = self.UpConv_3(emb_cat)
-        emb_cat = torch.cat([skip_connection_list[-5], emb], dim = 1)
-        
-        return emb_cat
+#     def forward(self, x):
+#         x = self.conv1(x)
+#         print("conv1",x)
+#         # x = F.relu(x)
+#         # print("relu",x)
+#         # x = self.do1(x)
+#         # print("do1",x)
+#         x = self.conv2(x)
+#         print("conv2",x)
+#         # x = F.relu(x)
+#         # print("relu",x)
+#         # x = self.do2(x)
+#         # print("do2",x)
+#         x = self.conv3(x)
+#         print("conv3",x)
+#         # x = F.relu(x)
+#         # print("relu",x)
+#         # x = self.do3(x)
+#         # print("do3",x)
+#         x = self.conv4(x)
+#         print("conv4",x)
+#         # x = F.relu(x)
+#         # print("relu",x)
+#         x = self.do(x)
+#         print("do",x)
+#         x = self.pool(x)
+#         print("pool",x)
+#         x = self.fc(x.squeeze())
+#         print("fc",x)
+#         print("is nan",torch.isnan(x).any())
+#         # x = self.do1(F.relu(self.conv1(x)))
+#         # x = self.do2(F.relu(self.conv2(x)))
+#         # x = self.do3(F.relu(self.conv3(x)))
+#         # x = self.do4(F.relu(self.conv4(x)))
+#         # x = self.pool(x)
+#         # x = self.fc(x.squeeze())
+#         return x
+ 
 
-class SegModel(nn.Module):
-    def __init__(self, CFG):
-        super().__init__()
-        self.encoder = Encoder(CFG)
-        self.decoder = Decoder(CFG)
-        self.head = nn.Sequential(
-            nn.Conv2d(CFG["channel_nums"][-1]*2, CFG["out_channels"], kernel_size=1, stride=1, padding=0),
-        )
-    def forward(self, img):
-        skip_connection_list = self.encoder(img)
-        emb = self.decoder(skip_connection_list)
-        output = self.head(emb)
-        return output
+# input_channel = CFG["img_size"][0]*CFG["img_size"][1]
+# x = torch.randn(CFG["batch_size"], input_channel, len(CFG["SURFACE_LIST"][0]))
+# print(x.shape)
+# model = VCID_1DNet(CFG)
+# output = model(x)
+# print(output.shape)
 
-""" 
-transfomrs
-"""
-train_transforms = A.Compose([
-    A.HorizontalFlip(p=0.5),
-    A.VerticalFlip(p=0.5),
-    A.RandomRotate90(p=0.5),
-    A.RandomCrop(int(CFG["img_size"][0]*0.8), int(CFG["img_size"][1]*0.8), p=0.3),
-    A.Blur(blur_limit=3, p=0.3),
-    A.Resize(CFG["input_img_size"][0], CFG["input_img_size"][1]),
-    ToTensorV2(),
-])
-
-valid_transforms = A.Compose([
-    A.Resize(CFG["input_img_size"][0], CFG["input_img_size"][1]),
-    ToTensorV2(),
-])
-
-"""
-Dataset
-"""
 class VCID_Dataset(Dataset):
-    def __init__(self, CFG, data_dir_list, surface_list, surface_volumes=None, slide_pos=[0,0], mode="train", transform=None):
+    def __init__(self, CFG, data_dir_list, surface_list, surface_volumes=None, mode="train", transform=None):
         # get config
         self.mode = mode
-        self.RANDOM_SLIDE = CFG["RANDOM_SLIDE"]
         self.img_size = CFG["img_size"]
         if self.mode=="train":  self.DATADIR = CFG["TRAIN_DIR"]
         elif self.mode=="valid":    self.DATADIR = CFG["TRAIN_DIR"]
         elif self.mode == "test":   self.DATADIR = CFG["TEST_DIR"]
         self.data_dir_list = data_dir_list
         self.surface_list = surface_list
-        self.slide_pos = slide_pos
         self.transform = transform
-        self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        
         # get imgs
-        # print("initializing dataset...")
+        print("initializing dataset...")
         self.imgs = []
         for data_dir in self.data_dir_list:
             img_path = os.path.join(self.DATADIR, data_dir, "mask.png")
@@ -289,14 +327,19 @@ class VCID_Dataset(Dataset):
         # get and split surface
         if surface_volumes is None:
             self.surface_vols = self.read_surfacevols()
+            # print("read surface_vols done.")
         else:
             # print("using loaded surface_vols")
             self.surface_vols = surface_volumes
        
         # split grid
+        # print("splitting grid...")
         self.get_all_grid()
+        # print("get all grid done.")
         self.fileter_grid()
+        # print("filter grid done.")
         self.get_flatten_grid()
+        # print("get flatten grid done.")
         # print("split grid done.") 
        
         # get label imgs
@@ -309,7 +352,7 @@ class VCID_Dataset(Dataset):
                 label = cv2.imread(label_path, cv2.IMREAD_GRAYSCALE)
                 label = label.reshape(label.shape[0], label.shape[1], 1) # (h, w, channel=1)
                 self.labels.append(label)# 画像サイズがそれぞれ違うので単純にconcatできずlist化しているs
-        # print("initializing dataset done.")
+        print("initializing dataset done.")
 
     def get_surface_volumes(self):
         return self.surface_vols
@@ -326,7 +369,6 @@ class VCID_Dataset(Dataset):
                 # print("\r", f"reading idx : {read_idx+1}/{len(self.surface_list)}", end="")
                 surface_path = os.path.join(self.DATADIR, data_dir, "surface_volume", f"{surface_idx:02}.tif")
                 surface_vol = cv2.imread(surface_path, cv2.IMREAD_GRAYSCALE)
-                surface_vol = self.clahe.apply(surface_vol)
                 surface_vol = surface_vol.reshape(surface_vol.shape[0], surface_vol.shape[1], 1) # (h, w, channel=1)
                 if surface_vol_ is None:
                     surface_vol_ = surface_vol
@@ -336,50 +378,27 @@ class VCID_Dataset(Dataset):
             # print(f"  => read surface volume done. [{data_dir}]")
         return surface_vols
 
-
     def get_grid_img(self, img, grid_idx):
         """ crop grid img from original img"""
-        img_grid = img[(grid_idx[0]*self.img_size[0]) + self.slide_pos[0] : ((grid_idx[0]+1)*self.img_size[0]) + self.slide_pos[0],
-                        (grid_idx[1]*self.img_size[1]) + self.slide_pos[1] : ((grid_idx[1]+1)*self.img_size[1]) + self.slide_pos[1]]
+        img_grid = img[grid_idx[0]*self.img_size[0] : (grid_idx[0]+1)*self.img_size[0],
+                        grid_idx[1]*self.img_size[1] : (grid_idx[1]+1)*self.img_size[1]]
         return img_grid
     
     def get_grid_img_and_mask(self, img, mask, grid_idx):
         """ crop grid img from original img"""
-        if self.RANDOM_SLIDE and self.mode=="train" and random.random() < 0.5:
-            if (grid_idx[0]!=0 and grid_idx[1]!=0) and (grid_idx[0]!=img.shape[0]//self.img_size[0] and grid_idx[1]!=img.shape[1]//self.img_size[1]):
-                rand_pos = [np.random.randint(0, self.img_size[0]//4) - self.img_size[0]//4, np.random.randint(0, self.img_size[1]//4)-self.img_size[1]//4]
-            else:
-                rand_pos = [0, 0]
-        else:
-            rand_pos = [0, 0]
-        self.rand_pos = rand_pos
-        img_grid = img[(grid_idx[0]*self.img_size[0]) + self.slide_pos[0] + rand_pos[0] : ((grid_idx[0]+1)*self.img_size[0]) + self.slide_pos[0] + rand_pos[0],
-                        (grid_idx[1]*self.img_size[1]) + self.slide_pos[1] + rand_pos[1] : ((grid_idx[1]+1)*self.img_size[1]) + self.slide_pos[1] + rand_pos[1]]
-        mask_grid = mask[(grid_idx[0]*self.img_size[0]) + self.slide_pos[0] + rand_pos[0] : ((grid_idx[0]+1)*self.img_size[0]) + self.slide_pos[0] + rand_pos[0],
-                         (grid_idx[1]*self.img_size[1]) + self.slide_pos[1] + rand_pos[1] : ((grid_idx[1]+1)*self.img_size[1]) + self.slide_pos[1] + rand_pos[1]]
+        img_grid = img[grid_idx[0]*self.img_size[0] : (grid_idx[0]+1)*self.img_size[0],
+                        grid_idx[1]*self.img_size[1] : (grid_idx[1]+1)*self.img_size[1]]
+        mask_grid = mask[grid_idx[0]*self.img_size[0] : (grid_idx[0]+1)*self.img_size[0],
+                         grid_idx[1]*self.img_size[1] : (grid_idx[1]+1)*self.img_size[1]]
         return img_grid/255., mask_grid/255.
-    
-    def get_masked_img(self, img, mask):
-        """ multiply mask to surface_volumes """
-        masked_img = None
-        for channel in range(img.shape[2]):
-            img_channel = img[:,:,channel].reshape(img.shape[0], img.shape[1],1)
-            masked = img_channel*mask
-            if masked_img is None:
-                masked_img = masked.reshape(masked.shape[0], masked.shape[1], 1)
-            else:
-                masked = masked.reshape(masked.shape[0], masked.shape[1], 1)
-                masked_img = np.concatenate([masked_img, masked], axis=2)
-        return masked_img
-    
     
     def get_all_grid(self):
         """ get all grid indices by img size and grid size
         """
         self.grid_indices = []
         for img in self.imgs:
-            self.x_grid_size = (img.shape[0] - self.slide_pos[0]) // self.img_size[0]
-            self.y_grid_size = (img.shape[1] - self.slide_pos[1]) // self.img_size[1]
+            self.x_grid_size = img.shape[0] // self.img_size[0]
+            self.y_grid_size = img.shape[1] // self.img_size[1]
             grid_img = []
             for i in range(self.x_grid_size):
                 for j in range(self.y_grid_size):
@@ -412,12 +431,16 @@ class VCID_Dataset(Dataset):
                 flatten_grid.append(grid_imgidx_list)
         self.flatten_grid = flatten_grid
         return self.flatten_grid
+   
+    def get_flatten_img(self, img):
+        """ get flatten img and mask by flatten_grid
+            Returns:flatten_img (array): flatten img array(h*w, channel=surface_num)
+                    flatten_mask (array): flatten mask array(h*w, channel=1)
+        """
+        # before flaten img shape (channel, h?, w?)
+        flatten_img = img.reshape(img.shape[1]*img.shape[2], img.shape[0])
+        return flatten_img
     
-    def channel_shuffle(self, img):
-        img = img.transpose(2, 0, 1)
-        np.random.shuffle(img)
-        return img.transpose(1, 2, 0)
-
     def __len__(self):
         return len(self.flatten_grid)
 
@@ -429,19 +452,17 @@ class VCID_Dataset(Dataset):
         # get img & surface_vol
         mask = self.imgs[img_idx]
         surface_vol = self.surface_vols[img_idx]
-        # mask = self.get_grid_img(mask, grid_idx)/255.
-        # surface_vol = self.get_grid_img(surface_vol, grid_idx)/255.
         mask, surface_vol = self.get_grid_img_and_mask(mask, surface_vol, grid_idx)
         # multiple small mask 
         assert surface_vol.shape[0]==mask.shape[0] and surface_vol.shape[1]==mask.shape[1] , "surface_vol_list shape is not same as img shape"
         img = surface_vol
-        # transform
         if self.mode == "test":
             if self.transform:
                 img = self.transform(image=img)["image"]
             else:
                 img = img.transpose(2, 0, 1)
                 img = torch.tensor(img, dtype=torch.float32)
+            img = self.get_flatten_grid(img)
             return img, grid_idx
         elif self.mode == "train" or self.mode=="valid":
             # get label(segmentation mask)
@@ -454,59 +475,44 @@ class VCID_Dataset(Dataset):
                 label = label.permute(2, 0, 1)/255. # (channel, h, w)
             else:
                 img = img.transpose(2, 0, 1) # (channel, h, w)
-                label = label.transpose(2, 0, 1)/255. # (channel, h, w){}
+                label = label.transpose(2, 0, 1) # (channel, h, w)
                 img = torch.tensor(img, dtype=torch.float32)
                 label = torch.tensor(label, dtype=torch.float32)
             assert img is not None and label is not None, f"img or label is None {img} {label}, {img_idx}, {grid_idx}, {self.rand_pos}"
+            img = self.get_flatten_img(img)
+            label = self.get_flatten_img(label)
             return img, label, grid_idx
 
-"""
-Loss
-"""
-ALPHA = 0.1 # < 0.5 penalises FP more, > 0.5 penalises FN more
-CE_RATIO = 0.90 #weighted contribution of modified CE loss compared to Dice loss
-class ComboLoss(nn.Module):
-    def __init__(self, weight=None, size_average=True):
-        super(ComboLoss, self).__init__()
+# valid_dirs = CFG["VALID_DIR_LIST"][0]
+# surface_list = CFG["SURFACE_LIST"][0]
+# print("dataset")
+# dataset_notrans = VCID_Dataset(CFG, valid_dirs, range(5), mode="train")
+# surface_volumes = dataset_notrans.surface_vols
+# print("dataloader")
+# dataloader_notrans = DataLoader(dataset_notrans, CFG["batch_size"], shuffle=False, num_workers=0)
 
-    def forward(self, inputs, targets, smooth=1, alpha=ALPHA, eps=1e-9):
-        
-        #flatten label and prediction tensors
-        inputs = inputs.view(-1)
-        targets = targets.view(-1)
-        
-        #True Positives, False Positives & False Negatives
-        intersection = (inputs * targets).sum()    
-        dice = (2. * intersection + smooth) / (inputs.sum() + targets.sum() + smooth)
-        
-        inputs = torch.clamp(inputs, eps, 1.0 - eps)       
-        out = - (ALPHA * ((targets * torch.log(inputs)) + ((1 - ALPHA) * (1.0 - targets) * torch.log(1.0 - inputs))))
-        weighted_ce = out.mean(-1)
-        # if dice is None or dice > 0:
-        #     combo = weighted_ce
-        # else:
-        #     combo = (CE_RATIO * weighted_ce) - ((1 - CE_RATIO) * dice)
-        combo = (CE_RATIO * weighted_ce) - ((1 - CE_RATIO) * dice)
-        assert combo is not None, f"combo loss is None, weighted_ce: {weighted_ce}, dice: {dice}"
-        return combo
+# print("check loader")
+# for batch_idx, (imgs, labels, grid_idx) in enumerate(dataloader_notrans):
+#     print(imgs.shape)
+#     print(labels.shape) 
+    # break
 
 
-def train_fn(train_loader, model, criterion, epoch ,optimizer, scheduler, CFG):
+
+
+def train_fn(train_loader, model, criterion, epoch ,optimizer, scheduler):
     model.train()
     batch_time = AverageMeter()
     losses = AverageMeter()
     start = end = time.time()
     for batch_idx, (images, targets, _) in enumerate(train_loader):
-        if CFG["DEBUG"] and batch_idx > 10:
-            break
         images = images.to(device, non_blocking = True).float()
-        targets = targets.to(device, non_blocking = True).float()     
+        targets = targets.to(device, non_blocking = True).float().squeeze()    
         preds = model(images)
-        preds = TF.resize(img=preds, size=(CFG["input_img_size"][0], CFG["input_img_size"][1]))
-        assert preds is not None, f"preds is None, {preds}, {images}, {targets}"
+        assert not torch.isnan(preds).any(), f"preds is nan, {preds}, {images}, {targets}"
         loss = criterion(preds, targets)
         preds = torch.sigmoid(preds)
-        assert loss is not None, f"loss is None, {loss}, {preds}, {targets}"
+        assert not torch.isnan(loss).any(), f"loss is nan, {loss}, {preds}, {targets}"
         losses.update(loss.item(), CFG["batch_size"]) 
         targets = targets.detach().cpu().numpy().ravel().tolist()
         preds = preds.detach().cpu().numpy().ravel().tolist()
@@ -529,7 +535,7 @@ def train_fn(train_loader, model, criterion, epoch ,optimizer, scheduler, CFG):
     torch.cuda.empty_cache()
     return losses.avg
 
-def valid_fn(model, valid_loader, CFG, criterion=None):
+def valid_fn(model, valid_loader, criterion=None):
     model.eval()# モデルを検証モードに設定
     test_targets = []
     test_preds = []
@@ -539,14 +545,13 @@ def valid_fn(model, valid_loader, CFG, criterion=None):
     start = end = time.time()
     for batch_idx, (images, targets, grid_idx) in enumerate(valid_loader):
         images = images.to(device, non_blocking = True).float()
-        targets = targets.to(device, non_blocking = True).float()
+        targets = targets.to(device, non_blocking = True).float().squeeze()
         with torch.no_grad():
             preds = model(images)
-            preds = TF.resize(img=preds, size=(CFG["input_img_size"][0], CFG["input_img_size"][1]))
-            assert preds is not None, f"preds is None, {preds}, {images}, {targets}"
+            assert not torch.isnan(preds).any(), f"preds is None, {preds}, {images}, {targets}"
             if not criterion is None:
                 loss = criterion(preds, targets)
-                assert loss is not None, f"loss is None, {loss}, {preds}, {targets}"
+                assert torch.isnan(loss).any(), f"loss is None, {loss}, {preds}, {targets}"
             preds = torch.sigmoid(preds)
         if not criterion is None:
             losses.update(loss.item(), CFG["batch_size"])
@@ -555,12 +560,15 @@ def valid_fn(model, valid_loader, CFG, criterion=None):
         targets = targets.detach().cpu().numpy()
         preds = preds.detach().cpu().numpy()
         
+        preds = preds.reshape(CFG["img_size"][0], CFG["img_size"][1], 1)
+        targets = targets.reshape(CFG["img_size"][0], CFG["img_size"][1], 1)
+        
         test_preds.extend([preds[idx, :,:,:].transpose(1,2,0) for idx in range(preds.shape[0])])
         test_targets.extend([targets[idx, :,:,:].transpose(1,2,0) for idx in range(targets.shape[0])])
         test_grid_idx.extend([[x_idx, y_idx] for x_idx, y_idx in zip(grid_idx[0].tolist(), grid_idx[1].tolist())])
 
         if (batch_idx % CFG["print_freq"] == 0 or batch_idx == (len(valid_loader)-1)) and (not criterion is None):
-            LOGGER.info('EVAL: [{0}/{1}] '
+            print('EVAL: [{0}/{1}] '
                 'Elapsed {remain:s} '
                 'Loss: {loss.val:.4f}({loss.avg:.4f}) '
                 .format(
@@ -575,36 +583,21 @@ def valid_fn(model, valid_loader, CFG, criterion=None):
     else:
         return test_targets, test_preds, test_grid_idx, losses.avg
 
-# def concat_grid_img(img_list, label_list, grid_idx_list, valid_dir_list, CFG, slide_pos=[0,0], tta="default"):
-#     # concat pred img and label to original size
-#     img_path = os.path.join(CFG["TRAIN_DIR"], valid_dir_list[0], "mask.png")
-#     img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-#     img = img.reshape(img.shape[0], img.shape[1], 1)
-#     pred_img = np.zeros_like(img).astype(np.float32)
-#     label_img = np.zeros_like(img).astype(np.float32)
-#     for img_idx, grid_idx in enumerate(grid_idx_list):
-#         if tta=="default":
-#             pred_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
-#                     grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += img_list[img_idx]
-#             label_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
-#                     grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += label_list[img_idx]
-#         elif tta=="vflip":
-#             pred_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
-#                     grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += np.flipud(img_list[img_idx])
-#             label_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
-#                     grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += np.flipud(label_list[img_idx])
-#         elif tta=="hflip":
-#             pred_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
-#                     grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += np.fliplr(img_list[img_idx])
-#             label_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
-#                     grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += np.fliplr(label_list[img_idx])
-#         else:
-#             pred_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
-#                     grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += img_list[img_idx]
-#             label_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
-#                     grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += label_list[img_idx]
+
+def concat_grid_img(img_list, label_list, grid_idx_list, valid_dir_list, slide_pos=[0,0]):
+    # concat pred img and label to original size
+    img_path = os.path.join(CFG["TRAIN_DIR"], valid_dir_list[0], "mask.png")
+    img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+    img = img.reshape(img.shape[0], img.shape[1], 1)
+    pred_img = np.zeros_like(img).astype(np.float32)
+    label_img = np.zeros_like(img).astype(np.float32)
+    for img_idx, grid_idx in enumerate(grid_idx_list):
+        pred_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
+                grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += img_list[img_idx]
         
-#     return pred_img, label_img
+        label_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
+                grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += label_list[img_idx]
+    return pred_img, label_img
 
 def concat_grid_img(img_list, label_list, grid_idx_list, valid_dir_list, CFG, slide_pos=[0,0], tta="default"):
     # concat pred img and label to original size
@@ -643,10 +636,130 @@ def concat_grid_img(img_list, label_list, grid_idx_list, valid_dir_list, CFG, sl
         
     return pred_img, label_img
 
-def save_and_plot_oof(mode, fold, slice_idx, slide_idx, tta, valid_preds_img, valid_targets_img, valid_preds_binary, CFG):
-    cv2.imwrite(os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_{mode}_slice{slice_idx}_slide{slide_idx}_{tta}_valid_pred_img.png"), valid_preds_img*255)
-    cv2.imwrite(os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_{mode}_slice{slice_idx}_slide{slide_idx}_{tta}_valid_predbin_img.png"), valid_preds_binary*255)
-    cv2.imwrite(os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_{mode}_slice{slice_idx}_slide{slide_idx}_{tta}_valid_targets_img.png"), valid_targets_img*255)
+
+
+def save_and_plot_oof(mode, fold, slice_idx, valid_preds_img, valid_targets_img, valid_preds_binary):
+    cv2.imwrite(os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_{mode}_slice{slice_idx}_valid_pred_img.png"), valid_preds_img*255)
+    cv2.imwrite(os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_{mode}_slice{slice_idx}_valid_predbin_img.png"), valid_preds_binary*255)
+    cv2.imwrite(os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_{mode}_slice{slice_idx}_valid_targets_img.png"), valid_targets_img*255)
+    
+    # plot preds & binary preds
+    # plt.figure(dpi=100)
+    # plt.subplot(1,3,1)
+    # plt.imshow(valid_preds_img)
+    # plt.subplot(1,3,2)
+    # plt.imshow(valid_preds_binary)
+    # plt.subplot(1,3,3)
+    # plt.imshow(valid_targets_img)
+    # plt.show()
+                
+
+def training_loop(CFG):
+    best_score_list = []
+    best_threshold_list = []
+    best_epoch_list = []
+    slice_ave_score_list = []
+    slice_ave_auc_list = []
+    slice_ave_score_threshold_list = []
+    for fold in CFG["folds"]:
+        print(f"-- fold{fold} training start --")
+ 
+        # set model & learning fn
+        model = VCID_1DNet(CFG)
+        model = model.to(device)
+        valid_img_slice = []
+        criterion = torch.nn.BCEWithLogitsLoss()
+        # weights = torch.tensor([0.3]).cuda()
+        # criterion = torch.nn.BCEWithLogitsLoss(pos_weight=weights)
+        optimizer = AdamW(model.parameters(), lr=CFG["lr"], weight_decay=CFG["weight_decay"], amsgrad=False)
+        scheduler = CosineAnnealingLR(optimizer, T_max=CFG["T_max"], eta_min=CFG["min_lr"], last_epoch=-1)
+        
+        # training
+        best_score = -np.inf
+        best_auc = -np.inf
+        best_valloss = np.inf
+        best_auc_valloss = np.inf
+        best_threshold = -1
+        start_time = time.time()
+        best_epoch = -1
+        best_auc_epoch = -1
+        valid_slice_ave = None       
+        for surface_idx, surface_list in enumerate(CFG["SURFACE_LIST"]):
+            LOGGER.info(f"surface: {surface_list}")
+            # separate train/valid data 
+            train_dirs = CFG["TRAIN_DIR_LIST"][fold]
+            valid_dirs = CFG["VALID_DIR_LIST"][fold]
+            train_dataset = VCID_Dataset(CFG, train_dirs, surface_list, mode="train")
+            valid_dataset = VCID_Dataset(CFG, valid_dirs, surface_list, mode="valid")
+            train_loader = DataLoader(train_dataset, batch_size=CFG["batch_size"], shuffle = True,
+                                        num_workers = CFG["num_workers"], pin_memory = True)
+            valid_loader = DataLoader(valid_dataset, batch_size=CFG["batch_size"], shuffle = False,
+                                        num_workers = CFG["num_workers"], pin_memory = True)
+            for epoch in range(1, CFG["n_epoch"] + 1):
+                epochs_ = epoch + CFG["n_epoch"]*surface_idx
+                print(f'- epoch:{epochs_} -')
+                train_loss_avg = train_fn(train_loader, model, criterion, epochs_ ,optimizer, scheduler)
+                valid_targets, valid_preds, valid_grid_idx, valid_loss_avg = valid_fn(model, valid_loader, criterion)
+                
+                # target, predをconcatして元のサイズに戻す
+                valid_preds_img, valid_targets_img  = concat_grid_img(valid_preds, valid_targets, valid_grid_idx, valid_dirs)
+                valid_score, valid_threshold, auc, dice_list = calc_cv(valid_targets_img, valid_preds_img)
+                valid_preds_binary = (valid_preds_img > valid_threshold).astype(np.uint8)
+                
+                elapsed = time.time() - start_time
+                print(f"\t epoch:{epochs_}, avg train loss:{train_loss_avg:.4f}, avg valid loss:{valid_loss_avg:.4f}")
+                print(f"\t score:{valid_score:.4f}(th={valid_threshold:3f}), auc={auc:4f}::: time:{elapsed:.2f}s")
+                if not CFG["DEBUG"]:
+                    logging_metrics_epoch(CFG, fold, epoch, train_loss_avg, valid_loss_avg, valid_score, valid_threshold, auc)
+                scheduler.step()
+                # validationスコアがbestを更新したらモデルを保存する
+                if valid_score > best_score:
+                    best_epoch = epochs_
+                    best_valloss = valid_loss_avg
+                    best_score = valid_score
+                    best_threshold = valid_threshold
+                    model_name = CFG["model_name"]
+                    model_path = os.path.join(CFG["OUTPUT_DIR"], f'{model_name}_fold{fold}.pth')
+                    torch.save(model.state_dict(), model_path) 
+                    print(f'Epoch {epochs_} - Save Best Score: {best_score:.4f}. Model is saved.')
+                    print("dice_list: ", dice_list)
+                    # save oof
+                    # save_and_plot_oof("score", fold, valid_preds_img, valid_targets_img, valid_preds_binary)
+                
+                if auc > best_auc:
+                    best_auc = auc
+                    best_auc_epoch = epochs_
+                    best_auc_valloss = valid_loss_avg
+                    model_name = CFG["model_name"]
+                    model_path = os.path.join(CFG["OUTPUT_DIR"], f'{model_name}_auc_fold{fold}.pth')
+                    torch.save(model.state_dict(), model_path) 
+                    print(f'Epoch {epochs_} - Save Best AUC: {best_auc:.4f}. Model is saved.')
+        
+        valid_sliceave_score, valid_sliceave_threshold, ave_auc, dice_list = calc_cv(valid_targets_img, valid_preds_img)
+        
+        slice_ave_score_list.append(valid_sliceave_score)
+        slice_ave_auc_list.append(ave_auc)
+        slice_ave_score_threshold_list.append(valid_sliceave_threshold)
+ 
+        valid_slice_binary = (valid_slice_ave > valid_sliceave_threshold).astype(np.uint8)
+        save_and_plot_oof("oof", fold, 999, valid_slice_ave, valid_targets_img, valid_slice_binary)
+        print(f'[fold{fold}] slice ave score:{valid_sliceave_score:.4f}(th={valid_sliceave_threshold:3f}), auc={ave_auc:4f}')
+        
+        print(f'[fold{fold}] BEST Epoch {best_epoch} - Save Best Score:{best_score:.4f}. Best loss:{best_valloss:.4f}')
+        print(f'[fold{fold}] BEST AUC Epoch {best_auc_epoch} - Save Best Score:{best_auc:.4f}. Best loss:{best_auc_valloss:.4f}')
+            
+        best_score_list.append(best_score)
+        best_threshold_list.append(best_threshold)
+        best_epoch_list.append(best_epoch)
+        del model, train_loader, train_dataset, valid_loader, valid_dataset, valid_preds_img, valid_targets_img, valid_preds_binary
+        gc.collect()
+        torch.cuda.empty_cache()
+        
+    for fold, (best_score, best_threshold, best_epoch) in enumerate(zip(best_score_list, best_threshold_list, best_epoch_list)):
+        print(f"fold[{fold}] BEST SCORE = {best_score:.4f} thr={best_threshold} (epoch={best_epoch})")
+        print(f"fold[{fold}] slice ave score:{slice_ave_score_list[fold]:.4f}(th={slice_ave_score_threshold_list[fold]:3f}), auc={slice_ave_auc_list[fold]:4f}")
+    return best_score_list, best_threshold_list, best_epoch_list
+
 
 def get_tta_aug(aug_type):
     if aug_type=="default":
@@ -671,118 +784,7 @@ def get_tta_aug(aug_type):
             A.resize(CFG["input_img_size"][0], CFG["input_img_size"][1]),
             ToTensorV2(),
             ])
-      
-def training_loop(CFG):
-    best_score_list = []
-    best_threshold_list = []
-    best_epoch_list = []
-    slice_ave_score_list = []
-    slice_ave_auc_list = []
-    slice_ave_score_threshold_list = []
-    for fold in CFG["folds"]:
-        LOGGER.info(f"-- fold{fold} training start --") 
-        # set model & learning fn
-        model = SegModel(CFG)
-        model = model.to(device)
-        valid_img_slice = []
-        weights = torch.tensor([0.3]).cuda()
-        criterion = torch.nn.BCEWithLogitsLoss(pos_weight=weights)
-        # criterion = torch.nn.BCEWithLogitsLoss()
-        optimizer = AdamW(model.parameters(), lr=CFG["lr"], weight_decay=CFG["weight_decay"], amsgrad=False)
-        scheduler = CosineAnnealingLR(optimizer, T_max=CFG["T_max"], eta_min=CFG["min_lr"], last_epoch=-1)
-        # scheduler = CyclicLR(optimizer, base_lr=CFG["base_lr"], max_lr=CFG["max_lr"],
-        #                     step_size_up=CFG["step_size_up"], step_size_down=CFG["step_size_down"], 
-        #                     cycle_momentum=False, mode='triangular2')
-        
-        # training
-        best_score = -np.inf
-        best_auc = -np.inf
-        best_valloss = np.inf
-        best_auc_valloss = np.inf
-        best_threshold = -1
-        start_time = time.time()
-        best_epoch = -1
-        best_auc_epoch = -1
-        valid_slice_ave = None       
-        for slice_idx, surface_list in enumerate(CFG["SURFACE_LIST"]):
-            LOGGER.info(f"surface_list: {surface_list}")
-            # separate train/valid data 
-            train_dirs = CFG["TRAIN_DIR_LIST"][fold]
-            valid_dirs = CFG["VALID_DIR_LIST"][fold]
-            train_dataset = VCID_Dataset(CFG, train_dirs, surface_list, mode="train", transform=train_transforms)
-            valid_dataset = VCID_Dataset(CFG, valid_dirs, surface_list, mode="valid", transform=valid_transforms)
-            train_loader = DataLoader(train_dataset, batch_size=CFG["batch_size"], shuffle = True,
-                                        num_workers = CFG["num_workers"], pin_memory = True)
-            valid_loader = DataLoader(valid_dataset, batch_size=CFG["batch_size"], shuffle = False,
-                                        num_workers = CFG["num_workers"], pin_memory = True)
-            for epoch in range(1, CFG["n_epoch"] + 1):
-                epochs_ = epoch + CFG["n_epoch"] * slice_idx
-                LOGGER.info(f'- epoch:{epochs_} -')
-                train_loss_avg = train_fn(train_loader, model, criterion, epochs_ ,optimizer, scheduler, CFG)
-                valid_targets, valid_preds, valid_grid_idx, valid_loss_avg = valid_fn(model, valid_loader, CFG, criterion)
-                
-                # target, predをconcatして元のサイズに戻す
-                valid_preds_img, valid_targets_img  = concat_grid_img(valid_preds, valid_targets, valid_grid_idx, valid_dirs, CFG)
-                valid_score, valid_threshold, auc, dice_list = calc_cv(valid_targets_img, valid_preds_img)
-                valid_preds_binary = (valid_preds_img > valid_threshold).astype(np.uint8)
-                
-                elapsed = time.time() - start_time
-                LOGGER.info(f"\t epoch:{epochs_}, avg train loss:{train_loss_avg:.4f}, avg valid loss:{valid_loss_avg:.4f}")
-                LOGGER.info(f"\t score:{valid_score:.4f}(th={valid_threshold:3f}), auc={auc:4f}::: time:{elapsed:.2f}s")
-                if not CFG["DEBUG"]:
-                    logging_metrics_epoch(CFG, fold, epoch, slice_idx, train_loss_avg, valid_loss_avg, valid_score, valid_threshold, auc)
-                scheduler.step()
-                # validationスコアがbestを更新したらモデルを保存する
-                if valid_score > best_score:
-                    best_epoch = epochs_
-                    best_valloss = valid_loss_avg
-                    best_score = valid_score
-                    best_threshold = valid_threshold
-                    model_name = CFG["model_name"]
-                    model_path = os.path.join(CFG["OUTPUT_DIR"], f'{model_name}_fold{fold}.pth')
-                    torch.save(model.state_dict(), model_path) 
-                    LOGGER.info(f'Epoch {epochs_} - Save Best Score: {best_score:.4f}. Model is saved.')
-                    LOGGER.info(f"dice_list: {dice_list}")
-                
-                if auc > best_auc:
-                    best_auc = auc
-                    best_auc_epoch = epochs_
-                    best_auc_valloss = valid_loss_avg
-                    model_name = CFG["model_name"]
-                    model_path = os.path.join(CFG["OUTPUT_DIR"], f'{model_name}_auc_fold{fold}.pth')
-                    torch.save(model.state_dict(), model_path) 
-                    LOGGER.info(f'Epoch {epochs_} - Save Best AUC: {best_auc:.4f}. Model is saved.')
-                    # save oof
-            # valid_img_slice.append(valid_preds_img)
-            if valid_slice_ave is None:
-                valid_slice_ave = valid_preds_img
-            else:
-                valid_slice_ave += valid_preds_img
-        valid_slice_ave /= len(CFG["SURFACE_LIST"])
-        valid_sliceave_score, valid_sliceave_threshold, ave_auc, dice_list = calc_cv(valid_targets_img, valid_slice_ave)
-        
-        slice_ave_score_list.append(valid_sliceave_score)
-        slice_ave_auc_list.append(ave_auc)
-        slice_ave_score_threshold_list.append(valid_sliceave_threshold)
  
-        valid_slice_binary = (valid_slice_ave > valid_sliceave_threshold).astype(np.uint8)
-        save_and_plot_oof("average", fold, 999, 999, "train",valid_slice_ave, valid_targets_img, valid_slice_binary, CFG)
-        LOGGER.info(f'[fold{fold}] slice ave score:{valid_sliceave_score:.4f}(th={valid_sliceave_threshold:3f}), auc={ave_auc:4f}')
-        LOGGER.info(f'[fold{fold}] BEST Epoch {best_epoch} - Save Best Score:{best_score:.4f}. Best loss:{best_valloss:.4f}')
-        LOGGER.info(f'[fold{fold}] BEST AUC Epoch {best_auc_epoch} - Save Best Score:{best_auc:.4f}. Best loss:{best_auc_valloss:.4f}')
-        
-        best_score_list.append(best_score)
-        best_threshold_list.append(best_threshold)
-        best_epoch_list.append(best_epoch)
-        del model, train_loader, train_dataset, valid_loader, valid_dataset, valid_preds_img, valid_targets_img, valid_preds_binary
-        gc.collect()
-        torch.cuda.empty_cache()
-        
-    for fold, (best_score, best_threshold, best_epoch) in enumerate(zip(best_score_list, best_threshold_list, best_epoch_list)):
-        LOGGER.info(f"fold[{fold}] BEST SCORE = {best_score:.4f} thr={best_threshold} (epoch={best_epoch})")
-        LOGGER.info(f"fold[{fold}] slice ave score:{slice_ave_score_list[fold]:.4f}(th={slice_ave_score_threshold_list[fold]:3f}), auc={slice_ave_auc_list[fold]:4f}")
-    return best_score_list, best_threshold_list, best_epoch_list
-
 
 def slide_inference_tta(CFG):
     tta_list = ["defalt", "hflip", "vflip"]
@@ -792,16 +794,15 @@ def slide_inference_tta(CFG):
         LOGGER.info(f"-- fold{fold} slide inference start --")
  
         # set model & learning fn
-        model = SegModel(CFG)
-        # model_path = os.path.join(CFG["OUTPUT_DIR"], f'{CFG["model_name"]}_fold{fold}.pth')
+        model = VCID_1DNet(CFG)
         model_path = os.path.join(CFG["OUTPUT_DIR"], f'{CFG["model_name"]}_auc_fold{fold}.pth')
         model.load_state_dict(torch.load(model_path))
         model = model.to(device)
         valid_img_slice = None
-        for slice_idx, surface_list in enumerate(CFG["SURFACE_LIST"]):
-            LOGGER.info(f"surface_list:{surface_list}")
+        for surface_list in CFG["SURFACE_LIST"]:
+            LOGGER.info(f"surface_list: {surface_list}")
             surface_volumes = None
-            for slide_idx, slide_pos in enumerate(CFG["slide_pos_list"]):
+            for slide_pos in CFG["slide_pos_list"]:
                 LOGGER.info(f"slide pos: {slide_pos}")
                 valid_dirs = CFG["VALID_DIR_LIST"][fold]
                 for tta in tta_list:
@@ -817,7 +818,7 @@ def slide_inference_tta(CFG):
                     valid_preds_img, valid_targets_img  = concat_grid_img(valid_preds, valid_targets, valid_grid_idx, valid_dirs, CFG, slide_pos, tta)
                     valid_score, valid_threshold, auc, dice_list = calc_cv(valid_targets_img, valid_preds_img)
                     valid_preds_binary = (valid_preds_img > valid_threshold).astype(np.uint8)
-                    save_and_plot_oof("slide", fold, slice_idx, slide_idx, tta,valid_preds_img, valid_targets_img, valid_preds_binary, CFG) 
+                    # save_and_plot_oof("slide", fold, slice_idx, valid_preds_img, valid_targets_img, valid_preds_binary, CFG) 
                     
                     elapsed = time.time() - start_time
                     LOGGER.info(f"\t score:{valid_score:.4f}(th={valid_threshold:3f}), auc={auc:4f}::: time:{elapsed:.2f}s")
@@ -834,7 +835,7 @@ def slide_inference_tta(CFG):
         slice_ave_score_threshold_list.append(valid_sliceave_threshold)
 
         valid_slice_binary = (valid_img_slice > valid_sliceave_threshold).astype(np.uint8)
-        save_and_plot_oof("average", fold, 555, 555, "ave", valid_img_slice, valid_targets_img, valid_slice_binary, CFG)
+        save_and_plot_oof("average", fold, 555, valid_img_slice, valid_targets_img, valid_slice_binary, CFG)
         LOGGER.info(f'[fold{fold}] slice ave score:{valid_sliceave_score:.4f}(th={valid_sliceave_threshold:3f}), auc={ave_auc:4f}')
          
         del model, valid_loader, valid_dataset, valid_preds_img, valid_targets_img, valid_preds_binary
@@ -876,24 +877,22 @@ def oofscore_log(CFG):
                                 }})
 
 if __name__=="__main__":
+    
     LOGGER.info(CFG)
     if not CFG["DEBUG"]:
         WANDB_CONFIG = {'competition': 'vcid', '_wandb_kernel': 'taro'}
         os.environ["WANDB_SILENT"] = "true"
         wandb.init(project=WANDB_CONFIG["competition"], config=CFG, group=CFG["EXP_CATEGORY"], name=CFG["EXP_NAME"], reinit=True)
+   
+    import yaml
+    with open(os.path.join(CFG["OUTPUT_DIR"], "Config.yaml"), "w") as f:
+        yaml.dump(CFG, f)
 
     best_score_list, best_threshold_list, best_epoch_list = training_loop(CFG)
     slice_ave_score_list, slice_ave_auc_list, slice_ave_score_threshold_list = slide_inference_tta(CFG)
-    
     
     if not CFG["DEBUG"]:
         oofscore_log(CFG)
         oof_score_check(CFG)
         wandb.finish()
-        
-
-    
-
-
-
-
+       
