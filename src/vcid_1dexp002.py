@@ -41,7 +41,7 @@ warnings.filterwarnings('ignore')
 
 BASE_DIR = "/working/"
 INPUT_DIR = os.path.join(BASE_DIR, "input", "vesuvius-challenge-ink-detection")
-EXP_NAME = "exp_1d000"
+EXP_NAME = "exp_1d002"
 CFG = dict(
     DEBUG=False,
     
@@ -63,7 +63,7 @@ CFG = dict(
     folds = [0],
     n_epoch = 50,
     lr = 1e-4,
-    base_lr = 1e-4,
+    base_lr = 5e-4,
     T_max = 10,
     min_lr = 1e-8,
     weight_decay = 1e-6,
