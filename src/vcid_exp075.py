@@ -497,8 +497,6 @@ def train_fn(train_loader, model, criterion, epoch ,optimizer, scheduler, CFG):
     losses = AverageMeter()
     start = end = time.time()
     for batch_idx, (images, targets, _) in enumerate(train_loader):
-        if CFG["DEBUG"] and batch_idx > 10:
-            break
         images = images.to(device, non_blocking = True).float()
         targets = targets.to(device, non_blocking = True).float()     
         preds = model(images)

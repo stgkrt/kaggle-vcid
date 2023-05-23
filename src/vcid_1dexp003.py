@@ -51,19 +51,20 @@ CFG = dict(
     
     # model
     model_name = "1dcnn",
-    img_size = [32, 32],
+    img_size = [3, 3],
     
     # data
-    SURFACE_LIST = [list(range(25, 40, 1))],
+    SURFACE_LIST = [list(range(10, 50, 1))],
     SLIDE_LIST = [[0,0]],
+    slide_pos_list = [[0,0]],
     RANDOM_SLIDE = True,
      
     # learning
     # folds = [0, 1, 2, 3, 4],
     folds = [0],
     n_epoch = 50,
-    lr = 1e-4,
-    base_lr = 5e-4,
+    lr = 1e-3,
+    base_lr = 1e-3,
     T_max = 10,
     min_lr = 1e-8,
     weight_decay = 1e-6,
@@ -88,7 +89,7 @@ CFG = dict(
 )
 if CFG["DEBUG"]:
     CFG["OUTPUT_DIR"] = os.path.join(BASE_DIR, "output", "debug")
-    CFG["SURFACE_LIST"] = [list(range(25, 40, 1))]
+    CFG["SURFACE_LIST"] = [list(range(10, 50, 1))]
     CFG["folds"] = [0]
     CFG["n_epoch"] = 1  
     
@@ -205,20 +206,55 @@ def calc_cv(mask_gt, mask_pred):
 
     return best_dice, best_th, auc, dice_list
 
+# exp000
+# class VCID_1DNet(nn.Module):
+#     def __init__(self, CFG_):
+#         super().__init__()
+#         channel = CFG_["img_size"][0]*CFG_["img_size"][1]
+#         # data_length = len(CFG_["SURFACE_LIST"][0])
+#         hdn = 32
+#         self.conv1 = nn.Conv1d(channel, hdn, kernel_size=9, stride=1, padding=1)
+#         self.bn1 = nn.BatchNorm1d(hdn)
+#         self.do1 = nn.Dropout(0.2)
+#         self.conv2 = nn.Conv1d(hdn, hdn*2, kernel_size=7, stride=1, padding=1)
+#         self.bn2 = nn.BatchNorm1d(hdn*2)
+#         self.do2 = nn.Dropout(0.2)
+#         self.conv3 = nn.Conv1d(hdn*2, hdn*2, kernel_size=5, stride=1, padding=1)
+#         self.bn3 = nn.BatchNorm1d(hdn*2)
+#         self.do3 = nn.Dropout(0.2)
+#         self.conv4 = nn.Conv1d(hdn*2, hdn*2, kernel_size=3, stride=1, padding=1)
+#         self.bn4 = nn.BatchNorm1d(hdn*2)
+#         self.do4 = nn.Dropout(0.2)
+#         self.pool = nn.MaxPool1d(2, stride=2)
+#         self.fc = nn.Linear(hdn*2, channel)
+        
+#     def forward(self, x):
+#         x = self.do1(F.relu(self.bn1(self.conv1(x))))
+#         x = self.do2(F.relu(self.bn2(self.conv2(x))))
+#         x = self.do3(F.relu(self.bn3(self.conv3(x))))
+#         x = self.do4(F.relu(self.bn4(self.conv4(x))))
+#         # x = F.adaptive_avg_pool1d(x, 1).reshape(x.shape[0], -1) #これいる？よくわからない
+#         x = self.pool(x)
+#         print(x.shape)
+#         # x = self.fc(x.squeeze())
+#         x = self.fc(x)
+#         return x
 
+
+# exp001 10 to 50
 class VCID_1DNet(nn.Module):
     def __init__(self, CFG_):
         super().__init__()
         channel = CFG_["img_size"][0]*CFG_["img_size"][1]
         # data_length = len(CFG_["SURFACE_LIST"][0])
         hdn = 32
-        self.conv1 = nn.Conv1d(channel, hdn, kernel_size=9, stride=1, padding=1)
+        self.conv1 = nn.Conv1d(channel, hdn, kernel_size=13, stride=2, padding=1)
         self.bn1 = nn.BatchNorm1d(hdn)
         self.do1 = nn.Dropout(0.2)
-        self.conv2 = nn.Conv1d(hdn, hdn*2, kernel_size=7, stride=1, padding=1)
+        self.conv2 = nn.Conv1d(hdn, hdn*2, kernel_size=7, stride=2, padding=1)
         self.bn2 = nn.BatchNorm1d(hdn*2)
         self.do2 = nn.Dropout(0.2)
-        self.conv3 = nn.Conv1d(hdn*2, hdn*2, kernel_size=5, stride=1, padding=1)
+        self.conv3 = nn.Conv1d(hdn*2, hdn*2, kernel_size=5, stride=2, padding=1)
         self.bn3 = nn.BatchNorm1d(hdn*2)
         self.do3 = nn.Dropout(0.2)
         self.conv4 = nn.Conv1d(hdn*2, hdn*2, kernel_size=3, stride=1, padding=1)
@@ -343,6 +379,7 @@ class VCID_Dataset(Dataset):
             self.imgs.append(img)  
         
         # get and split surface
+        print("reading surface_vols...")
         if surface_volumes is None:
             self.surface_vols = self.read_surfacevols()
             # print("read surface_vols done.")
@@ -351,14 +388,14 @@ class VCID_Dataset(Dataset):
             self.surface_vols = surface_volumes
        
         # split grid
-        # print("splitting grid...")
+        print("splitting grid...")
         self.get_all_grid()
-        # print("get all grid done.")
+        print("get all grid done.")
         self.fileter_grid()
-        # print("filter grid done.")
+        print("filter grid done.")
         self.get_flatten_grid()
-        # print("get flatten grid done.")
-        # print("split grid done.") 
+        print("get flatten grid done.")
+        print("split grid done.") 
        
         # get label imgs
         if self.mode == "train" or self.mode == "valid":
@@ -824,24 +861,24 @@ def training_loop(CFG):
 def get_tta_aug(aug_type):
     if aug_type=="default":
         return A.Compose([
-            A.resize(CFG["input_img_size"][0], CFG["input_img_size"][1]),
+            A.resize(CFG["img_size"][0], CFG["img_size"][1]),
             ToTensorV2(),
             ])
     elif aug_type=="hflip":
         return A.Compose([
-            A.resize(CFG["input_img_size"][0], CFG["input_img_size"][1]),
+            A.resize(CFG["img_size"][0], CFG["img_size"][1]),
             A.HorizontalFlip(p=1.0),
             ToTensorV2(),
         ])
     elif aug_type=="vflip":
         return A.Compose([
-            A.resize(CFG["input_img_size"][0], CFG["input_img_size"][1]),
+            A.resize(CFG["img_size"][0], CFG["img_size"][1]),
             A.VerticalFlip(p=1.0),
             ToTensorV2(),
         ])
     else:
         return A.Compose([
-            A.resize(CFG["input_img_size"][0], CFG["input_img_size"][1]),
+            A.resize(CFG["img_size"][0], CFG["img_size"][1]),
             ToTensorV2(),
             ])
  
