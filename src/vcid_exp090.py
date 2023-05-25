@@ -37,7 +37,7 @@ warnings.filterwarnings('ignore')
 Configureations
 """
 DEBUG = False 
-EXP_NAME = "exp089"
+EXP_NAME = "exp090"
 EXP_YAML_PAHT = os.path.join("/working", "output", EXP_NAME, "Config.yaml")
 # read yaml file to CFG
 with open(EXP_YAML_PAHT) as yaml_file:
@@ -47,7 +47,7 @@ os.makedirs(os.path.join("/working", "output", EXP_NAME, "imgs"), exist_ok=True)
 CFG["EXP_NAME"] = EXP_NAME
 CFG["DEBUG"] = DEBUG
 CFG["OUTPUT_DIR"] = os.path.join("/working", "output", EXP_NAME)
-CFG["SUMMARY"] = f"{EXP_NAME}: model:efficientnetb6, grid img size 256, img size 512, not channel shuffle, bcewithlogits weight, CosineAnealing, lr=1e-3, loss weights, small grid"
+CFG["SUMMARY"] = f"{EXP_NAME}: model:efficientnetb2, grid img size 256, img size, sharing encoder model(encoder input channel=1)"
 
 
 if DEBUG:
@@ -178,14 +178,31 @@ def calc_cv(mask_gt, mask_pred):
 
 """
 MODEL
-"""
+""" 
 class Encoder(nn.Module):
     def __init__(self, CFG):
         super().__init__()
-        self.encoder = timm.create_model(CFG["model_name"], in_chans=CFG["inp_channels"], 
-                                         features_only=True, out_indices=CFG["out_indices"], pretrained=CFG["pretrained"])
+        self.encoder = timm.create_model(CFG["model_name"], in_chans=CFG["inp_channels"], features_only=True,
+                                         out_indices=CFG["out_indices"], pretrained=False)
+        self.conv0 = nn.Conv2d(CFG["channel_nums"][0], CFG["channel_nums"][0]//CFG["surface_num"], kernel_size=1)
+        self.conv1 = nn.Conv2d(CFG["channel_nums"][1], CFG["channel_nums"][1]//CFG["surface_num"], kernel_size=1)
+        self.conv2 = nn.Conv2d(CFG["channel_nums"][2], CFG["channel_nums"][2]//CFG["surface_num"], kernel_size=1)
+        self.conv3 = nn.Conv2d(CFG["channel_nums"][3], CFG["channel_nums"][3]//CFG["surface_num"], kernel_size=1)
+        self.conv4 = nn.Conv2d(CFG["channel_nums"][4], CFG["channel_nums"][4]//CFG["surface_num"], kernel_size=1)
     def forward(self, img):
-        skip_connection_list = self.encoder(img)
+        skip_connection_ = self.encoder(img)
+        skip_connection_list = []
+        
+        skip_c = self.conv4(skip_connection_[0])
+        skip_connection_list.append(skip_c)
+        skip_c = self.conv3(skip_connection_[1])
+        skip_connection_list.append(skip_c)
+        skip_c = self.conv2(skip_connection_[2])
+        skip_connection_list.append(skip_c)
+        skip_c = self.conv1(skip_connection_[3])
+        skip_connection_list.append(skip_c)
+        skip_c = self.conv0(skip_connection_[4])
+        skip_connection_list.append(skip_c)
         return skip_connection_list
 
 class UpConv(nn.Module):
@@ -212,17 +229,17 @@ class Decoder(nn.Module):
         self.UpConv_3 = UpConv(CFG["channel_nums"][3]*2, CFG["channel_nums"][4])
     
     def forward(self, skip_connection_list):
-        emb = self.UpConv_0(skip_connection_list[-1])
-        emb_cat = torch.cat([skip_connection_list[-2], emb], dim = 1)
+        emb = self.UpConv_0(skip_connection_list[4])
+        emb_cat = torch.cat([skip_connection_list[3], emb], dim = 1)
         
         emb = self.UpConv_1(emb_cat)
-        emb_cat = torch.cat([skip_connection_list[-3], emb], dim = 1)
+        emb_cat = torch.cat([skip_connection_list[2], emb], dim = 1)
         
         emb = self.UpConv_2(emb_cat)
-        emb_cat = torch.cat([skip_connection_list[-4], emb], dim = 1)
+        emb_cat = torch.cat([skip_connection_list[1], emb], dim = 1)
         
         emb = self.UpConv_3(emb_cat)
-        emb_cat = torch.cat([skip_connection_list[-5], emb], dim = 1)
+        emb_cat = torch.cat([skip_connection_list[0], emb], dim = 1)
         
         return emb_cat
 
@@ -233,12 +250,24 @@ class SegModel(nn.Module):
         self.decoder = Decoder(CFG)
         self.head = nn.Sequential(
             nn.Conv2d(CFG["channel_nums"][-1]*2, CFG["out_channels"], kernel_size=1, stride=1, padding=0),
+            nn.Sigmoid()
         )
     def forward(self, img):
-        skip_connection_list = self.encoder(img)
-        emb = self.decoder(skip_connection_list)
+        skip_connection_channels_list = []
+        for channel in range(img.shape[1]):
+            input_img = img[:, channel,: ,:]
+            skip_connection_list = self.encoder(input_img.unsqueeze(1))
+            if len(skip_connection_channels_list) == 0:
+                skip_connection_channels_list = skip_connection_list
+            else:
+                for idx, skip_c in enumerate(skip_connection_list):
+                    skip_connection_channels_list[idx] = torch.cat([skip_connection_channels_list[idx],skip_c], axis=1)
+        
+        
+        emb = self.decoder(skip_connection_channels_list)
         output = self.head(emb)
         return output
+
 
 """ 
 transfomrs
@@ -738,7 +767,7 @@ def training_loop(CFG):
                     LOGGER.info(f'Epoch {epochs_} - Save Best Score: {best_score:.4f}. Model is saved.')
                     LOGGER.info(f"dice_list: {dice_list}")
                     # save oof
-                    save_and_plot_oof("score", fold, slice_idx, valid_preds_img, valid_targets_img, valid_preds_binary, CFG)
+                    # save_and_plot_oof("score", fold, slice_idx, valid_preds_img, valid_targets_img, valid_preds_binary, CFG)
                 
                 if auc > best_auc:
                     best_auc = auc
@@ -749,7 +778,7 @@ def training_loop(CFG):
                     torch.save(model.state_dict(), model_path) 
                     LOGGER.info(f'Epoch {epochs_} - Save Best AUC: {best_auc:.4f}. Model is saved.')
                     # save oof
-                    save_and_plot_oof("auc", fold, slice_idx, valid_preds_img, valid_targets_img, valid_preds_binary, CFG)
+                    # save_and_plot_oof("auc", fold, slice_idx, valid_preds_img, valid_targets_img, valid_preds_binary, CFG)
             # valid_img_slice.append(valid_preds_img)
             if valid_slice_ave is None:
                 valid_slice_ave = valid_preds_img
@@ -763,7 +792,7 @@ def training_loop(CFG):
         slice_ave_score_threshold_list.append(valid_sliceave_threshold)
  
         valid_slice_binary = (valid_slice_ave > valid_sliceave_threshold).astype(np.uint8)
-        save_and_plot_oof("average", fold, 999, valid_slice_ave, valid_targets_img, valid_slice_binary, CFG)
+        # save_and_plot_oof("average", fold, 999, valid_slice_ave, valid_targets_img, valid_slice_binary, CFG)
         LOGGER.info(f'[fold{fold}] slice ave score:{valid_sliceave_score:.4f}(th={valid_sliceave_threshold:3f}), auc={ave_auc:4f}')
         LOGGER.info(f'[fold{fold}] BEST Epoch {best_epoch} - Save Best Score:{best_score:.4f}. Best loss:{best_valloss:.4f}')
         LOGGER.info(f'[fold{fold}] BEST AUC Epoch {best_auc_epoch} - Save Best Score:{best_auc:.4f}. Best loss:{best_auc_valloss:.4f}')
@@ -814,7 +843,7 @@ def slide_inference_tta(CFG):
                     valid_preds_img, valid_targets_img  = concat_grid_img(valid_preds, valid_targets, valid_grid_idx, valid_dirs, CFG, slide_pos, tta)
                     valid_score, valid_threshold, auc, dice_list = calc_cv(valid_targets_img, valid_preds_img)
                     valid_preds_binary = (valid_preds_img > valid_threshold).astype(np.uint8)
-                    save_and_plot_oof("slide", fold, slice_idx, valid_preds_img, valid_targets_img, valid_preds_binary, CFG) 
+                    # save_and_plot_oof("slide", fold, slice_idx, valid_preds_img, valid_targets_img, valid_preds_binary, CFG) 
                     
                     elapsed = time.time() - start_time
                     LOGGER.info(f"\t score:{valid_score:.4f}(th={valid_threshold:3f}), auc={auc:4f}::: time:{elapsed:.2f}s")
