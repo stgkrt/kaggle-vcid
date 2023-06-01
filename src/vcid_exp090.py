@@ -36,7 +36,7 @@ warnings.filterwarnings('ignore')
 """
 Configureations
 """
-DEBUG = False 
+DEBUG = True 
 EXP_NAME = "exp090"
 EXP_YAML_PAHT = os.path.join("/working", "output", EXP_NAME, "Config.yaml")
 # read yaml file to CFG
@@ -606,94 +606,61 @@ def valid_fn(model, valid_loader, CFG, criterion=None):
     else:
         return test_targets, test_preds, test_grid_idx, losses.avg
 
-# def concat_grid_img(img_list, label_list, grid_idx_list, valid_dir_list, CFG, slide_pos=[0,0], tta="default"):
-#     # concat pred img and label to original size
-#     img_path = os.path.join(CFG["TRAIN_DIR"], valid_dir_list[0], "mask.png")
-#     img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-#     img = img.reshape(img.shape[0], img.shape[1], 1)
-#     pred_img = np.zeros_like(img).astype(np.float32)
-#     label_img = np.zeros_like(img).astype(np.float32)
-#     for img_idx, grid_idx in enumerate(grid_idx_list):
-#         if tta=="default":
-#             pred_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
-#                     grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += img_list[img_idx]
-#             label_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
-#                     grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += label_list[img_idx]
-#         elif tta=="vflip":
-#             pred_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
-#                     grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += np.flipud(img_list[img_idx])
-#             label_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
-#                     grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += np.flipud(label_list[img_idx])
-#         elif tta=="hflip":
-#             pred_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
-#                     grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += np.fliplr(img_list[img_idx])
-#             label_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
-#                     grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += np.fliplr(label_list[img_idx])
-#         else:
-#             pred_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
-#                     grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += img_list[img_idx]
-#             label_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
-#                     grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += label_list[img_idx]
-        
-#     return pred_img, label_img
-
 def concat_grid_img(img_list, label_list, grid_idx_list, valid_dir_list, CFG, slide_pos=[0,0], tta="default"):
     # concat pred img and label to original size
-    img_path = os.path.join(CFG["TRAIN_DIR"], valid_dir_list[0], "mask.png")
-    img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-    img = img.reshape(img.shape[0], img.shape[1], 1)
-    pred_img = np.zeros_like(img).astype(np.float32)
-    label_img = np.zeros_like(img).astype(np.float32)
+    label_path = os.path.join(CFG["TRAIN_DIR"], valid_dir_list[0], "inklabels.png")
+    label_img = cv2.imread(label_path, cv2.IMREAD_GRAYSCALE)
+    label_img = label_img.reshape(label_img.shape[0], label_img.shape[1], 1)
+    label_img = (label_img > 0).astype(np.float32)
+    pred_img = np.zeros_like(label_img).astype(np.float32)
     for img_idx, grid_idx in enumerate(grid_idx_list):
         img_ = img_list[img_idx]
-        label_ = label_list[img_idx]
         img_ = cv2.resize(img_, dsize=(CFG["img_size"][0], CFG["img_size"][1]))
-        label_ = cv2.resize(label_, (CFG["img_size"][0], CFG["img_size"][1]))
         img_ = img_[:, :, np.newaxis]
-        label_ = label_[:, :, np.newaxis]
         if tta=="default":
             pred_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
                     grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += img_
-            label_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
-                    grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += label_
         elif tta=="vflip":
             pred_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
                     grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += np.flipud(img_)
-            label_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
-                    grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += np.flipud(label_)
         elif tta=="hflip":
             pred_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
                     grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += np.fliplr(img_)
-            label_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
-                    grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += np.fliplr(label_)
         else:
             pred_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
                     grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += img_
-            label_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
-                    grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += label_
         
     return pred_img, label_img
 
+
 def save_and_plot_oof(mode, fold, slice_idx, valid_preds_img, valid_targets_img, valid_preds_binary, CFG):
     cv2.imwrite(os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_{mode}_slice{slice_idx}_valid_pred_img.png"), valid_preds_img*255)
-    cv2.imwrite(os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_{mode}_slice{slice_idx}_valid_predbin_img.png"), valid_preds_binary*255)
-    cv2.imwrite(os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_{mode}_slice{slice_idx}_valid_targets_img.png"), valid_targets_img*255)
+    cv2.imwrite(os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_oofpred.png"), valid_preds_img*255)
+    # cv2.imwrite(os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_{mode}_slice{slice_idx}_valid_predbin_img.png"), valid_preds_binary*255)
+    # cv2.imwrite(os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_{mode}_slice{slice_idx}_valid_targets_img.png"), valid_targets_img*255)
 
 def get_tta_aug(aug_type):
     if aug_type=="default":
-        return A.Compose([ToTensorV2(),])
+        return A.Compose([
+            A.Resize(CFG["input_img_size"][0], CFG["input_img_size"][1]),
+            ToTensorV2(),])
     elif aug_type=="hflip":
         return A.Compose([
+            A.Resize(CFG["input_img_size"][0], CFG["input_img_size"][1]),
             A.HorizontalFlip(p=1.0),
             ToTensorV2(),
         ])
     elif aug_type=="vflip":
         return A.Compose([
+            A.Resize(CFG["input_img_size"][0], CFG["input_img_size"][1]), 
             A.VerticalFlip(p=1.0),
             ToTensorV2(),
         ])
     else:
-        return A.Compose([ToTensorV2(),])
+        return A.Compose([
+            A.Resize(CFG["input_img_size"][0], CFG["input_img_size"][1]),
+            ToTensorV2(),
+            ])
       
 def training_loop(CFG):
     best_score_list = []
@@ -710,13 +677,8 @@ def training_loop(CFG):
         valid_img_slice = []
         weights = torch.tensor([0.3]).cuda()
         criterion = torch.nn.BCEWithLogitsLoss(pos_weight=weights)
-        # criterion = torch.nn.BCEWithLogitsLoss()
         optimizer = AdamW(model.parameters(), lr=CFG["lr"], weight_decay=CFG["weight_decay"], amsgrad=False)
         scheduler = CosineAnnealingLR(optimizer, T_max=CFG["T_max"], eta_min=CFG["min_lr"], last_epoch=-1)
-        # scheduler = CyclicLR(optimizer, base_lr=CFG["base_lr"], max_lr=CFG["max_lr"],
-        #                     step_size_up=CFG["step_size_up"], step_size_down=CFG["step_size_down"], 
-        #                     cycle_momentum=False, mode='triangular2')
-        
         # training
         best_score = -np.inf
         best_auc = -np.inf
@@ -809,7 +771,6 @@ def training_loop(CFG):
         LOGGER.info(f"fold[{fold}] slice ave score:{slice_ave_score_list[fold]:.4f}(th={slice_ave_score_threshold_list[fold]:3f}), auc={slice_ave_auc_list[fold]:4f}")
     return best_score_list, best_threshold_list, best_epoch_list
 
-
 def slide_inference_tta(CFG):
     tta_list = ["defalt", "hflip", "vflip"]
     start_time = time.time()
@@ -842,9 +803,7 @@ def slide_inference_tta(CFG):
                     # target, predをconcatして元のサイズに戻す
                     valid_preds_img, valid_targets_img  = concat_grid_img(valid_preds, valid_targets, valid_grid_idx, valid_dirs, CFG, slide_pos, tta)
                     valid_score, valid_threshold, auc, dice_list = calc_cv(valid_targets_img, valid_preds_img)
-                    valid_preds_binary = (valid_preds_img > valid_threshold).astype(np.uint8)
-                    # save_and_plot_oof("slide", fold, slice_idx, valid_preds_img, valid_targets_img, valid_preds_binary, CFG) 
-                    
+                    # valid_preds_binary = (valid_preds_img > valid_threshold).astype(np.uint8)
                     elapsed = time.time() - start_time
                     LOGGER.info(f"\t score:{valid_score:.4f}(th={valid_threshold:3f}), auc={auc:4f}::: time:{elapsed:.2f}s")
                     # valid_img_slice.append(valid_preds_img)
@@ -852,7 +811,7 @@ def slide_inference_tta(CFG):
                         valid_img_slice = valid_preds_img
                     else:
                         valid_img_slice += valid_preds_img
-        valid_img_slice /= (len(["SURFACE_LIST"])*len(CFG["slide_pos_list"])*len(tta_list))
+        valid_img_slice /= (len(CFG["SURFACE_LIST"])*len(CFG["slide_pos_list"])*len(tta_list))
         valid_sliceave_score, valid_sliceave_threshold, ave_auc, dice_list = calc_cv(valid_targets_img, valid_img_slice)
         
         slice_ave_score_list.append(valid_sliceave_score)
@@ -863,7 +822,7 @@ def slide_inference_tta(CFG):
         save_and_plot_oof("average", fold, 555, valid_img_slice, valid_targets_img, valid_slice_binary, CFG)
         LOGGER.info(f'[fold{fold}] slice ave score:{valid_sliceave_score:.4f}(th={valid_sliceave_threshold:3f}), auc={ave_auc:4f}')
          
-        del model, valid_loader, valid_dataset, valid_preds_img, valid_targets_img, valid_preds_binary
+        del model, valid_loader, valid_dataset, valid_preds_img, valid_targets_img
         gc.collect()
         torch.cuda.empty_cache()
     return slice_ave_score_list, slice_ave_auc_list, slice_ave_score_threshold_list
@@ -874,7 +833,9 @@ def oof_score_check(CFG):
     mask_flatten_list = []
     for fold in CFG["folds"]:
         pred_path = os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_average_slice555_valid_pred_img.png")
-        mask_path = os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_average_slice555_valid_targets_img.png")
+        # mask_path = os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_average_slice555_valid_targets_img.png")
+        valid_dirs = CFG["VALID_DIR_LIST"][fold]
+        mask_path = os.path.join(CFG["TRAIN_DIR"], valid_dirs[0], "inklabels.png")
         LOGGER.info(pred_path)
         pred_img = cv2.imread(pred_path, cv2.IMREAD_GRAYSCALE)
         mask_img = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
@@ -919,6 +880,7 @@ if __name__=="__main__":
         
 
     
+
 
 
 

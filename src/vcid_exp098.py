@@ -38,7 +38,7 @@ warnings.filterwarnings('ignore')
 Configureations
 """
 DEBUG = False
-EXP_NAME = "exp095"
+EXP_NAME = "exp098"
 EXP_YAML_PAHT = os.path.join("/working", "output", EXP_NAME, "Config.yaml")
 # read yaml file to CFG
 with open(EXP_YAML_PAHT) as yaml_file:
@@ -48,7 +48,7 @@ os.makedirs(os.path.join("/working", "output", EXP_NAME, "imgs"), exist_ok=True)
 CFG["EXP_NAME"] = EXP_NAME
 CFG["DEBUG"] = DEBUG
 CFG["OUTPUT_DIR"] = os.path.join("/working", "output", EXP_NAME)
-CFG["SUMMARY"] = f"{EXP_NAME}: model:efficientnetb6, grid img size 256, img size 512, layer change. Comboloss"
+CFG["SUMMARY"] = f"{EXP_NAME}: model:efficientnetb6, grid img size 256, img size 512, filter negative mask, closing mask"
 
 
 if DEBUG:
@@ -189,6 +189,18 @@ class Encoder(nn.Module):
         skip_connection_list = self.encoder(img)
         return skip_connection_list
 
+
+class Encoder_2(nn.Module):
+    def __init__(self, CFG):
+        super().__init__()
+        self.encoder = timm.create_model(CFG["model_name"], in_chans=CFG["channel_nums"][4], 
+                                         features_only=True, out_indices=CFG["out_indices"], pretrained=False)
+    def forward(self, img):
+        skip_connection_list = self.encoder(img)
+        return skip_connection_list
+
+
+
 class UpConv(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
@@ -211,35 +223,47 @@ class Decoder(nn.Module):
         self.UpConv_1 = UpConv(CFG["channel_nums"][1]*2, CFG["channel_nums"][2])
         self.UpConv_2 = UpConv(CFG["channel_nums"][2]*2, CFG["channel_nums"][3])
         self.UpConv_3 = UpConv(CFG["channel_nums"][3]*2, CFG["channel_nums"][4])
+        self.UpConv_4 = UpConv(CFG["channel_nums"][4]*2, CFG["channel_nums"][4])
     
     def forward(self, skip_connection_list):
         emb = self.UpConv_0(skip_connection_list[-1])
         emb_cat = torch.cat([skip_connection_list[-2], emb], dim = 1)
-        
         emb = self.UpConv_1(emb_cat)
         emb_cat = torch.cat([skip_connection_list[-3], emb], dim = 1)
-        
         emb = self.UpConv_2(emb_cat)
         emb_cat = torch.cat([skip_connection_list[-4], emb], dim = 1)
-        
         emb = self.UpConv_3(emb_cat)
         emb_cat = torch.cat([skip_connection_list[-5], emb], dim = 1)
-        
-        return emb_cat
+        emb = self.UpConv_4(emb_cat)
+        return emb
 
 class SegModel(nn.Module):
     def __init__(self, CFG):
         super().__init__()
         self.encoder = Encoder(CFG)
         self.decoder = Decoder(CFG)
+        
+        self.encoder_2 = Encoder_2(CFG)
+        self.decoder_2 = Decoder(CFG)
         self.head = nn.Sequential(
-            nn.Conv2d(CFG["channel_nums"][-1]*2, CFG["out_channels"], kernel_size=1, stride=1, padding=0),
+            nn.Conv2d(CFG["channel_nums"][-1], CFG["out_channels"], kernel_size=1, stride=1, padding=0),
         )
     def forward(self, img):
         skip_connection_list = self.encoder(img)
         emb = self.decoder(skip_connection_list)
+        skip_connection_list_2 = self.encoder_2(emb)
+        emb = self.decoder_2(skip_connection_list_2)
         output = self.head(emb)
         return output
+
+# model = SegModel(CFG)
+# x = torch.randn(1, len(CFG["SURFACE_LIST"][0]), 512, 512)
+# print(x.shape)
+# out = model(x)
+# print(out.shape)
+
+# raise Exception("stop")
+
 
 """ 
 transfomrs
@@ -398,7 +422,7 @@ class VCID_Dataset(Dataset):
             for grid_idx in grid_indices:
                 img_grid = self.get_grid_img(img, grid_idx)
                 label_grid = self.get_grid_img(label, grid_idx)
-                if img_grid.sum() == 0:
+                if img_grid.sum() == 0:#このimgはパピルスありなしのmask
                     grid_indices_copy.remove(grid_idx)
                 elif self.mode=="train" and label_grid.sum() == 0:# trainでは文字がないgridは除外
                     grid_indices_copy.remove(grid_idx)
