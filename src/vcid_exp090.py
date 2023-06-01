@@ -51,7 +51,7 @@ CFG["SUMMARY"] = f"{EXP_NAME}: model:efficientnetb2, grid img size 256, img size
 
 
 if DEBUG:
-    CFG["n_epoch"] = 1
+    CFG["n_epoch"] = 10
     CFG["folds"] = [0]
     CFG["SURFACE_LIST"] = [list(range(25, 35, 3))]
     CFG["slide_pos_list"] = [[0,0]]
@@ -256,14 +256,12 @@ class SegModel(nn.Module):
         skip_connection_channels_list = []
         for channel in range(img.shape[1]):
             input_img = img[:, channel,: ,:]
-            skip_connection_list = self.encoder(input_img.unsqueeze(1))
+            skip_connection_list = self.encoder(input_img.unsqueeze(1))#同じencoderを使う
             if len(skip_connection_channels_list) == 0:
                 skip_connection_channels_list = skip_connection_list
             else:
                 for idx, skip_c in enumerate(skip_connection_list):
                     skip_connection_channels_list[idx] = torch.cat([skip_connection_channels_list[idx],skip_c], axis=1)
-        
-        
         emb = self.decoder(skip_connection_channels_list)
         output = self.head(emb)
         return output
