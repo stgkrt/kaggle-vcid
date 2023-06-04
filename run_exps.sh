@@ -1,7 +1,9 @@
 #!/bin/sh
-python scripts/vcid_exp047.py
-python scripts/vcid_exp048.py
-python scripts/vcid_exp049.py
-python scripts/vcid_exp050.py
-# python scripts/vcid_exp043.py
-# python scripts/vcid_exp044.py
+python src/vcid_exp095.py
+python src/vcid_exp097.py
+
+# python src/vcid_1dexp001.py
+# python src/vcid_1dexp002.py
+
+# python src/vcid_1dexp003.py
+# python src/vcid_1dexp004.py

@@ -16,6 +16,7 @@ import torch.nn as nn
 import timm
 from torchvision.models.feature_extraction import create_feature_extractor
 import torchvision.transforms.functional as TF
+import torch.nn.functional as F
 
 # data loader
 import albumentations as A
@@ -36,8 +37,8 @@ warnings.filterwarnings('ignore')
 """
 Configureations
 """
-DEBUG = True 
-EXP_NAME = "exp090"
+DEBUG = False
+EXP_NAME = "exp099"
 EXP_YAML_PAHT = os.path.join("/working", "output", EXP_NAME, "Config.yaml")
 # read yaml file to CFG
 with open(EXP_YAML_PAHT) as yaml_file:
@@ -47,13 +48,13 @@ os.makedirs(os.path.join("/working", "output", EXP_NAME, "imgs"), exist_ok=True)
 CFG["EXP_NAME"] = EXP_NAME
 CFG["DEBUG"] = DEBUG
 CFG["OUTPUT_DIR"] = os.path.join("/working", "output", EXP_NAME)
-CFG["SUMMARY"] = f"{EXP_NAME}: model:efficientnetb2, grid img size 256, img size, sharing encoder model(encoder input channel=1)"
+CFG["SUMMARY"] = f"{EXP_NAME}: model:efficientnetb6, grid img size 256, img size 512, layer change. Comboloss"
 
 
 if DEBUG:
-    CFG["n_epoch"] = 10
+    CFG["n_epoch"] = 25
     CFG["folds"] = [0]
-    CFG["SURFACE_LIST"] = [list(range(25, 35, 3))]
+    CFG["SURFACE_LIST"] = [list(range(30, 40, 3))]
     CFG["slide_pos_list"] = [[0,0]]
 
 
@@ -178,31 +179,14 @@ def calc_cv(mask_gt, mask_pred):
 
 """
 MODEL
-""" 
+"""
 class Encoder(nn.Module):
     def __init__(self, CFG):
         super().__init__()
-        self.encoder = timm.create_model(CFG["model_name"], in_chans=CFG["inp_channels"], features_only=True,
-                                         out_indices=CFG["out_indices"], pretrained=False)
-        self.conv0 = nn.Conv2d(CFG["channel_nums"][0], CFG["channel_nums"][0]//CFG["surface_num"], kernel_size=1)
-        self.conv1 = nn.Conv2d(CFG["channel_nums"][1], CFG["channel_nums"][1]//CFG["surface_num"], kernel_size=1)
-        self.conv2 = nn.Conv2d(CFG["channel_nums"][2], CFG["channel_nums"][2]//CFG["surface_num"], kernel_size=1)
-        self.conv3 = nn.Conv2d(CFG["channel_nums"][3], CFG["channel_nums"][3]//CFG["surface_num"], kernel_size=1)
-        self.conv4 = nn.Conv2d(CFG["channel_nums"][4], CFG["channel_nums"][4]//CFG["surface_num"], kernel_size=1)
+        self.encoder = timm.create_model(CFG["model_name"], in_chans=CFG["inp_channels"], 
+                                         features_only=True, out_indices=CFG["out_indices"], pretrained=CFG["pretrained"])
     def forward(self, img):
-        skip_connection_ = self.encoder(img)
-        skip_connection_list = []
-        
-        skip_c = self.conv4(skip_connection_[0])
-        skip_connection_list.append(skip_c)
-        skip_c = self.conv3(skip_connection_[1])
-        skip_connection_list.append(skip_c)
-        skip_c = self.conv2(skip_connection_[2])
-        skip_connection_list.append(skip_c)
-        skip_c = self.conv1(skip_connection_[3])
-        skip_connection_list.append(skip_c)
-        skip_c = self.conv0(skip_connection_[4])
-        skip_connection_list.append(skip_c)
+        skip_connection_list = self.encoder(img)
         return skip_connection_list
 
 class UpConv(nn.Module):
@@ -229,17 +213,17 @@ class Decoder(nn.Module):
         self.UpConv_3 = UpConv(CFG["channel_nums"][3]*2, CFG["channel_nums"][4])
     
     def forward(self, skip_connection_list):
-        emb = self.UpConv_0(skip_connection_list[4])
-        emb_cat = torch.cat([skip_connection_list[3], emb], dim = 1)
+        emb = self.UpConv_0(skip_connection_list[-1])
+        emb_cat = torch.cat([skip_connection_list[-2], emb], dim = 1)
         
         emb = self.UpConv_1(emb_cat)
-        emb_cat = torch.cat([skip_connection_list[2], emb], dim = 1)
+        emb_cat = torch.cat([skip_connection_list[-3], emb], dim = 1)
         
         emb = self.UpConv_2(emb_cat)
-        emb_cat = torch.cat([skip_connection_list[1], emb], dim = 1)
+        emb_cat = torch.cat([skip_connection_list[-4], emb], dim = 1)
         
         emb = self.UpConv_3(emb_cat)
-        emb_cat = torch.cat([skip_connection_list[0], emb], dim = 1)
+        emb_cat = torch.cat([skip_connection_list[-5], emb], dim = 1)
         
         return emb_cat
 
@@ -252,29 +236,20 @@ class SegModel(nn.Module):
             nn.Conv2d(CFG["channel_nums"][-1]*2, CFG["out_channels"], kernel_size=1, stride=1, padding=0),
         )
     def forward(self, img):
-        skip_connection_channels_list = []
-        for channel in range(img.shape[1]):
-            input_img = img[:, channel,: ,:]
-            skip_connection_list = self.encoder(input_img.unsqueeze(1))#同じencoderを使う
-            if len(skip_connection_channels_list) == 0:
-                skip_connection_channels_list = skip_connection_list
-            else:
-                for idx, skip_c in enumerate(skip_connection_list):
-                    skip_connection_channels_list[idx] = torch.cat([skip_connection_channels_list[idx],skip_c], axis=1)
-        emb = self.decoder(skip_connection_channels_list)
+        skip_connection_list = self.encoder(img)
+        emb = self.decoder(skip_connection_list)
         output = self.head(emb)
         return output
-
 
 """ 
 transfomrs
 """
 train_transforms = A.Compose([
-    A.HorizontalFlip(p=0.5),
-    A.VerticalFlip(p=0.5),
-    A.RandomRotate90(p=0.5),
-    A.RandomCrop(int(CFG["img_size"][0]*0.8), int(CFG["img_size"][1]*0.8), p=0.3),
-    A.Blur(blur_limit=3, p=0.3),
+    A.HorizontalFlip(p=0.3),
+    A.VerticalFlip(p=0.3),
+    # A.RandomRotate90(p=0.3),
+    A.RandomCrop(int(CFG["img_size"][0]*0.9), int(CFG["img_size"][1]*0.9), p=0.3),
+    # A.Blur(blur_limit=3, p=0.3),
     A.Resize(CFG["input_img_size"][0], CFG["input_img_size"][1]),
     ToTensorV2(),
 ])
@@ -300,7 +275,6 @@ class VCID_Dataset(Dataset):
         self.surface_list = surface_list
         self.slide_pos = slide_pos
         self.transform = transform
-        # self.cleha = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
         # get imgs
         # print("initializing dataset...")
         self.imgs = []
@@ -319,12 +293,6 @@ class VCID_Dataset(Dataset):
             # print("using loaded surface_vols")
             self.surface_vols = surface_volumes
        
-        # split grid
-        self.get_all_grid()
-        self.fileter_grid()
-        self.get_flatten_grid()
-        # print("split grid done.") 
-       
         # get label imgs
         if self.mode == "train" or self.mode == "valid":
             self.labels = []
@@ -333,8 +301,18 @@ class VCID_Dataset(Dataset):
                 assert os.path.exists(label_path), f"{label_path} is not exist."
                 # read label
                 label = cv2.imread(label_path, cv2.IMREAD_GRAYSCALE)
+                if self.mode == "train" or self.mode=="valid":
+                    # closing
+                    kernel = np.ones((50, 50),np.uint8)
+                    label = cv2.morphologyEx(label.astype(np.float32), cv2.MORPH_CLOSE, kernel)
                 label = label.reshape(label.shape[0], label.shape[1], 1) # (h, w, channel=1)
                 self.labels.append(label)# 画像サイズがそれぞれ違うので単純にconcatできずlist化しているs
+        
+        # split grid
+        self.get_all_grid()
+        self.fileter_grid()
+        self.get_flatten_grid()
+        # print("split grid done.") 
         # print("initializing dataset done.")
 
     def get_surface_volumes(self):
@@ -352,7 +330,6 @@ class VCID_Dataset(Dataset):
                 # print("\r", f"reading idx : {read_idx+1}/{len(self.surface_list)}", end="")
                 surface_path = os.path.join(self.DATADIR, data_dir, "surface_volume", f"{surface_idx:02}.tif")
                 surface_vol = cv2.imread(surface_path, cv2.IMREAD_GRAYSCALE)
-                # surface_vol = self.cleha.apply(surface_vol)
                 surface_vol = surface_vol.reshape(surface_vol.shape[0], surface_vol.shape[1], 1) # (h, w, channel=1)
                 if surface_vol_ is None:
                     surface_vol_ = surface_vol
@@ -416,11 +393,14 @@ class VCID_Dataset(Dataset):
     def fileter_grid(self):
         """ get grid indices which mask is not 0 by all grid indices"""
         grid_indices_all = []
-        for img, grid_indices in zip(self.imgs, self.grid_indices):
+        for img, label, grid_indices in zip(self.imgs, self.labels, self.grid_indices):
             grid_indices_copy = grid_indices.copy()
             for grid_idx in grid_indices:
                 img_grid = self.get_grid_img(img, grid_idx)
+                label_grid = self.get_grid_img(label, grid_idx)
                 if img_grid.sum() == 0:
+                    grid_indices_copy.remove(grid_idx)
+                elif self.mode=="train" and label_grid.sum() == 0:# trainでは文字がないgridは除外
                     grid_indices_copy.remove(grid_idx)
             grid_indices_all.append(grid_indices_copy)
         self.grid_indices = grid_indices_all
@@ -493,14 +473,13 @@ class VCID_Dataset(Dataset):
 """
 Loss
 """
-ALPHA = 0.1 # < 0.5 penalises FP more, > 0.5 penalises FN more
-CE_RATIO = 0.90 #weighted contribution of modified CE loss compared to Dice loss
+ALPHA = 0.10 # < 0.5 penalises FP more, > 0.5 penalises FN more
+CE_RATIO = 0.85 #weighted contribution of modified CE loss compared to Dice loss
 class ComboLoss(nn.Module):
     def __init__(self, weight=None, size_average=True):
         super(ComboLoss, self).__init__()
 
-    def forward(self, inputs, targets, smooth=1, alpha=ALPHA, eps=1e-9):
-        
+    def forward(self, inputs, targets, smooth=1, alpha=ALPHA, eps=1e-7):
         #flatten label and prediction tensors
         inputs = inputs.view(-1)
         targets = targets.view(-1)
@@ -509,17 +488,40 @@ class ComboLoss(nn.Module):
         intersection = (inputs * targets).sum()    
         dice = (2. * intersection + smooth) / (inputs.sum() + targets.sum() + smooth)
         
-        inputs = torch.clamp(inputs, eps, 1.0 - eps)       
+        inputs = torch.sigmoid(inputs)# add sigmoid(taro)
+        inputs = torch.clamp(inputs, eps, 1.0 - eps)  
+        # print(torch.log(inputs), torch.isnan(torch.log(inputs)).any(), torch.isinf(torch.log(inputs)).any())
+        # print(torch.log(1.0 - inputs), torch.isnan(torch.log(1.0 - inputs)).any(), torch.isinf(torch.log(1.0 - inputs)).any())   
         out = - (ALPHA * ((targets * torch.log(inputs)) + ((1 - ALPHA) * (1.0 - targets) * torch.log(1.0 - inputs))))
         weighted_ce = out.mean(-1)
-        # if dice is None or dice > 0:
-        #     combo = weighted_ce
-        # else:
-        #     combo = (CE_RATIO * weighted_ce) - ((1 - CE_RATIO) * dice)
         combo = (CE_RATIO * weighted_ce) - ((1 - CE_RATIO) * dice)
-        assert combo is not None, f"combo loss is None, weighted_ce: {weighted_ce}, dice: {dice}"
+        assert not (torch.isnan(combo).any() or torch.isinf(combo).any()), f"combo loss is None, weighted_ce: {weighted_ce}, dice: {dice}"
         return combo
 
+#PyTorch
+ALPHA = 0.40
+BETA = 0.60
+GAMMA = 1
+class FocalTverskyLoss(nn.Module):
+    def __init__(self, weight=None, size_average=True):
+        super(FocalTverskyLoss, self).__init__()
+
+    def forward(self, inputs, targets, smooth=1, alpha=ALPHA, beta=BETA, gamma=GAMMA):        
+        #comment out if your model contains a sigmoid or equivalent activation layer
+        inputs = F.sigmoid(inputs)       
+        
+        #flatten label and prediction tensors
+        inputs = inputs.view(-1)
+        targets = targets.view(-1)
+        
+        #True Positives, False Positives & False Negatives
+        TP = (inputs * targets).sum()    
+        FP = ((1-targets) * inputs).sum()
+        FN = (targets * (1-inputs)).sum()
+        
+        Tversky = (TP + smooth) / (TP + alpha*FP + beta*FN + smooth)  
+        FocalTversky = (1 - Tversky)**gamma               
+        return FocalTversky
 
 def train_fn(train_loader, model, criterion, epoch ,optimizer, scheduler, CFG):
     model.train()
@@ -674,8 +676,14 @@ def training_loop(CFG):
         valid_img_slice = []
         weights = torch.tensor([0.3]).cuda()
         criterion = torch.nn.BCEWithLogitsLoss(pos_weight=weights)
+        # criterion = torch.nn.BCEWithLogitsLoss()
+        # criterion = ComboLoss()
         optimizer = AdamW(model.parameters(), lr=CFG["lr"], weight_decay=CFG["weight_decay"], amsgrad=False)
         scheduler = CosineAnnealingLR(optimizer, T_max=CFG["T_max"], eta_min=CFG["min_lr"], last_epoch=-1)
+        # scheduler = CyclicLR(optimizer, base_lr=CFG["base_lr"], max_lr=CFG["max_lr"],
+        #                     step_size_up=CFG["step_size_up"], step_size_down=CFG["step_size_down"], 
+        #                     cycle_momentum=False, mode='triangular2')
+        
         # training
         best_score = -np.inf
         best_auc = -np.inf
@@ -725,6 +733,8 @@ def training_loop(CFG):
                     torch.save(model.state_dict(), model_path) 
                     LOGGER.info(f'Epoch {epochs_} - Save Best Score: {best_score:.4f}. Model is saved.')
                     LOGGER.info(f"dice_list: {dice_list}")
+                    # save oof
+                    save_and_plot_oof("score", fold, slice_idx, valid_preds_img, valid_targets_img, valid_preds_binary, CFG)
                 
                 if auc > best_auc:
                     best_auc = auc
@@ -734,6 +744,9 @@ def training_loop(CFG):
                     model_path = os.path.join(CFG["OUTPUT_DIR"], f'{model_name}_auc_fold{fold}.pth')
                     torch.save(model.state_dict(), model_path) 
                     LOGGER.info(f'Epoch {epochs_} - Save Best AUC: {best_auc:.4f}. Model is saved.')
+                    # save oof
+                    save_and_plot_oof("auc", fold, slice_idx, valid_preds_img, valid_targets_img, valid_preds_binary, CFG)
+            # valid_img_slice.append(valid_preds_img)
             if valid_slice_ave is None:
                 valid_slice_ave = valid_preds_img
             else:
@@ -745,6 +758,8 @@ def training_loop(CFG):
         slice_ave_auc_list.append(ave_auc)
         slice_ave_score_threshold_list.append(valid_sliceave_threshold)
  
+        valid_slice_binary = (valid_slice_ave > valid_sliceave_threshold).astype(np.uint8)
+        save_and_plot_oof("average", fold, 999, valid_slice_ave, valid_targets_img, valid_slice_binary, CFG)
         LOGGER.info(f'[fold{fold}] slice ave score:{valid_sliceave_score:.4f}(th={valid_sliceave_threshold:3f}), auc={ave_auc:4f}')
         LOGGER.info(f'[fold{fold}] BEST Epoch {best_epoch} - Save Best Score:{best_score:.4f}. Best loss:{best_valloss:.4f}')
         LOGGER.info(f'[fold{fold}] BEST AUC Epoch {best_auc_epoch} - Save Best Score:{best_auc:.4f}. Best loss:{best_auc_valloss:.4f}')
@@ -752,7 +767,7 @@ def training_loop(CFG):
         best_score_list.append(best_score)
         best_threshold_list.append(best_threshold)
         best_epoch_list.append(best_epoch)
-        del model, train_loader, train_dataset, valid_loader, valid_dataset, valid_preds_img, valid_targets_img 
+        del model, train_loader, train_dataset, valid_loader, valid_dataset, valid_preds_img, valid_targets_img, valid_preds_binary
         gc.collect()
         torch.cuda.empty_cache()
         
@@ -760,6 +775,7 @@ def training_loop(CFG):
         LOGGER.info(f"fold[{fold}] BEST SCORE = {best_score:.4f} thr={best_threshold} (epoch={best_epoch})")
         LOGGER.info(f"fold[{fold}] slice ave score:{slice_ave_score_list[fold]:.4f}(th={slice_ave_score_threshold_list[fold]:3f}), auc={slice_ave_auc_list[fold]:4f}")
     return best_score_list, best_threshold_list, best_epoch_list
+
 
 def slide_inference_tta(CFG):
     tta_list = ["defalt", "hflip", "vflip"]
@@ -802,6 +818,9 @@ def slide_inference_tta(CFG):
                     else:
                         valid_img_slice += valid_preds_img
         valid_img_slice /= (len(CFG["SURFACE_LIST"])*len(CFG["slide_pos_list"])*len(tta_list))
+        
+        valid_img_slice = cv2.GaussianBlur(valid_img_slice, (65, 65), 32)
+        
         valid_sliceave_score, valid_sliceave_threshold, ave_auc, dice_list = calc_cv(valid_targets_img, valid_img_slice)
         
         slice_ave_score_list.append(valid_sliceave_score)
@@ -870,7 +889,6 @@ if __name__=="__main__":
         
 
     
-
 
 
 
