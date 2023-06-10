@@ -37,7 +37,7 @@ warnings.filterwarnings('ignore')
 Configureations
 """
 DEBUG = False 
-EXP_NAME = "exp104"
+EXP_NAME = "exp_stack_007"
 EXP_YAML_PAHT = os.path.join("/working", "output", EXP_NAME, "Config.yaml")
 # read yaml file to CFG
 with open(EXP_YAML_PAHT) as yaml_file:
@@ -47,15 +47,13 @@ os.makedirs(os.path.join("/working", "output", EXP_NAME, "imgs"), exist_ok=True)
 CFG["EXP_NAME"] = EXP_NAME
 CFG["DEBUG"] = DEBUG
 CFG["OUTPUT_DIR"] = os.path.join("/working", "output", EXP_NAME)
-
-CFG["SUMMARY"] = f"{EXP_NAME}: add train augmentation"
+CFG["SUMMARY"] = f"{EXP_NAME}: model:efficientnetb0, stacking"
 
 if DEBUG:
-    CFG["n_epoch"] = 1
+    CFG["n_epoch"] = 10
     CFG["folds"] = [0]
-    CFG["SURFACE_LIST"] = [[25, 28, 31, 34]]
-    CFG["slide_pos_list"] = [[0,0]]
-print(CFG["SURFACE_LIST"])
+    CFG["slide_pos_list"] = [[0,0], [0, 128], [128, 0], [128, 128]]
+print(CFG["pred_names"])
 
 def init_logger(log_file=os.path.join(CFG["OUTPUT_DIR"], 'train.log')):
     """Output Log."""
@@ -70,7 +68,6 @@ def init_logger(log_file=os.path.join(CFG["OUTPUT_DIR"], 'train.log')):
     logger.addHandler(handler2)
     return logger
 LOGGER = init_logger()
-
 
 
 """
@@ -175,6 +172,7 @@ def calc_cv(mask_gt, mask_pred):
     best_dice, best_th, auc, dice_list = calc_fbeta_auc(mask_gt, mask_pred)
     return best_dice, best_th, auc, dice_list
 
+
 """
 MODEL
 """
@@ -209,6 +207,7 @@ class Decoder(nn.Module):
         self.UpConv_1 = UpConv(CFG["channel_nums"][1]*2, CFG["channel_nums"][2])
         self.UpConv_2 = UpConv(CFG["channel_nums"][2]*2, CFG["channel_nums"][3])
         self.UpConv_3 = UpConv(CFG["channel_nums"][3]*2, CFG["channel_nums"][4])
+        self.UpConv_4 = UpConv(CFG["channel_nums"][4]*2, CFG["channel_nums"][4])
     
     def forward(self, skip_connection_list):
         emb = self.UpConv_0(skip_connection_list[-1])
@@ -222,8 +221,9 @@ class Decoder(nn.Module):
         
         emb = self.UpConv_3(emb_cat)
         emb_cat = torch.cat([skip_connection_list[-5], emb], dim = 1)
-        
-        return emb_cat
+
+        emb = self.UpConv_4(emb_cat)
+        return emb
 
 class SegModel(nn.Module):
     def __init__(self, CFG):
@@ -231,7 +231,7 @@ class SegModel(nn.Module):
         self.encoder = Encoder(CFG)
         self.decoder = Decoder(CFG)
         self.head = nn.Sequential(
-            nn.Conv2d(CFG["channel_nums"][-1]*2, CFG["out_channels"], kernel_size=1, stride=1, padding=0),
+            nn.Conv2d(CFG["channel_nums"][-1], CFG["out_channels"], kernel_size=1, stride=1, padding=0),
         )
     def forward(self, img):
         skip_connection_list = self.encoder(img)
@@ -239,9 +239,8 @@ class SegModel(nn.Module):
         output = self.head(emb)
         return output
 
-
 # model = SegModel(CFG)
-# x = torch.randn(1, 2*CFG["inp_channels"], 512, 512)
+# x = torch.randn(1, CFG["inp_channels"], CFG["input_img_size"][0], CFG["input_img_size"][1])
 # print(x.shape)
 # out = model(x)
 # print(out.shape)
@@ -252,12 +251,9 @@ class SegModel(nn.Module):
 transfomrs
 """
 train_transforms = A.Compose([
-    A.HorizontalFlip(p=0.5),
-    A.VerticalFlip(p=0.5),
-    A.RandomRotate90(p=0.5),
-    A.SafeRotate(limit=180, p=0.5),
+    A.HorizontalFlip(p=0.3),
+    A.VerticalFlip(p=0.3),
     A.RandomCrop(int(CFG["img_size"][0]*0.8), int(CFG["img_size"][1]*0.8), p=0.3),
-    A.Blur(blur_limit=3, p=0.3),
     A.Resize(CFG["input_img_size"][0], CFG["input_img_size"][1]),
     ToTensorV2(),
 ])
@@ -271,7 +267,7 @@ valid_transforms = A.Compose([
 Dataset
 """
 class VCID_Dataset(Dataset):
-    def __init__(self, CFG, data_dir_list, surface_list, surface_volumes=None, slide_pos=[0,0], mode="train", transform=None):
+    def __init__(self, CFG, data_dir_list, pred_names, slide_pos=[0,0], mode="train", transform=None):
         # get config
         self.mode = mode
         self.RANDOM_SLIDE = CFG["RANDOM_SLIDE"]
@@ -280,10 +276,9 @@ class VCID_Dataset(Dataset):
         elif self.mode=="valid":    self.DATADIR = CFG["TRAIN_DIR"]
         elif self.mode == "test":   self.DATADIR = CFG["TEST_DIR"]
         self.data_dir_list = data_dir_list
-        self.surface_list = surface_list
+        self.pred_names = pred_names
         self.slide_pos = slide_pos
         self.transform = transform
-        # self.cleha = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
         # get imgs
         # print("initializing dataset...")
         self.imgs = []
@@ -295,12 +290,7 @@ class VCID_Dataset(Dataset):
             assert img is not None, "img is None. data path is wrong"
             self.imgs.append(img)  
         
-        # get and split surface
-        if surface_volumes is None:
-            self.surface_vols = self.read_surfacevols()
-        else:
-            # print("using loaded surface_vols")
-            self.surface_vols = surface_volumes
+        self.oof_preds = self.read_oofpreds()
        
         # split grid
         self.get_all_grid()
@@ -320,30 +310,25 @@ class VCID_Dataset(Dataset):
                 self.labels.append(label)# 画像サイズがそれぞれ違うので単純にconcatできずlist化しているs
         # print("initializing dataset done.")
 
-    def get_surface_volumes(self):
-        return self.surface_vols
-
-    def read_surfacevols(self):
-        """ read surface volume by data_dir_list and surface_list 
-            Returns:surface_vuls (list): surface volume list [array(h,w,channel=surface_num), array(), ...]
+    def read_oofpreds(self):
+        """ read oof predictions by pred names 
+            Returns:oof pred img (concat channel axis) : array(h,w,channel=pred num)
         """
-        surface_vols = []
-        # print("reading surface volume...")
-        for data_dir in self.data_dir_list:
-            surface_vol_ = None
-            for read_idx, surface_idx in enumerate(self.surface_list):
-                # print("\r", f"reading idx : {read_idx+1}/{len(self.surface_list)}", end="")
-                surface_path = os.path.join(self.DATADIR, data_dir, "surface_volume", f"{surface_idx:02}.tif")
-                surface_vol = cv2.imread(surface_path, cv2.IMREAD_GRAYSCALE)
-                # surface_vol = self.cleha.apply(surface_vol)
-                surface_vol = surface_vol.reshape(surface_vol.shape[0], surface_vol.shape[1], 1) # (h, w, channel=1)
-                if surface_vol_ is None:
-                    surface_vol_ = surface_vol
+        
+        oof_preds_list = []
+        for img_idx in self.data_dir_list:
+            oof_preds = None
+            for pred_name in self.pred_names:
+                pred_path = os.path.join(CFG["OOF_DIR"], pred_name + '_' + img_idx + '.npy')
+                pred = np.load(pred_path)
+                pred = pred.reshape(pred.shape[0], pred.shape[1], 1)
+                if oof_preds is None:
+                    oof_preds = pred
                 else:
-                    surface_vol_ = np.concatenate([surface_vol_, surface_vol], axis=2) # (h, w, channel=surface_num)
-            surface_vols.append(surface_vol_)
-            # print(f"  => read surface volume done. [{data_dir}]")
-        return surface_vols
+                    oof_preds = np.concatenate([oof_preds, pred], axis=2)
+            oof_preds_list.append(oof_preds)
+        # print("reading[dd] surface volume...")
+        return oof_preds_list
 
 
     def get_grid_img(self, img, grid_idx):
@@ -354,7 +339,7 @@ class VCID_Dataset(Dataset):
     
     def get_grid_img_and_mask(self, img, mask, grid_idx):
         """ crop grid img from original img"""
-        if self.RANDOM_SLIDE and self.mode=="train" and random.random() < 0.5:
+        if self.RANDOM_SLIDE and self.mode=="train" and random.random() < 0.8:
             if (grid_idx[0]!=0 and grid_idx[1]!=0) and (grid_idx[0]!=img.shape[0]//self.img_size[0] and grid_idx[1]!=img.shape[1]//self.img_size[1]):
                 rand_pos = [np.random.randint(0, self.img_size[0]//4) - self.img_size[0]//4, np.random.randint(0, self.img_size[1]//4)-self.img_size[1]//4]
             else:
@@ -366,21 +351,7 @@ class VCID_Dataset(Dataset):
                         (grid_idx[1]*self.img_size[1]) + self.slide_pos[1] + rand_pos[1] : ((grid_idx[1]+1)*self.img_size[1]) + self.slide_pos[1] + rand_pos[1]]
         mask_grid = mask[(grid_idx[0]*self.img_size[0]) + self.slide_pos[0] + rand_pos[0] : ((grid_idx[0]+1)*self.img_size[0]) + self.slide_pos[0] + rand_pos[0],
                          (grid_idx[1]*self.img_size[1]) + self.slide_pos[1] + rand_pos[1] : ((grid_idx[1]+1)*self.img_size[1]) + self.slide_pos[1] + rand_pos[1]]
-        return img_grid/255., mask_grid/255.
-    
-    def get_masked_img(self, img, mask):
-        """ multiply mask to surface_volumes """
-        masked_img = None
-        for channel in range(img.shape[2]):
-            img_channel = img[:,:,channel].reshape(img.shape[0], img.shape[1],1)
-            masked = img_channel*mask
-            if masked_img is None:
-                masked_img = masked.reshape(masked.shape[0], masked.shape[1], 1)
-            else:
-                masked = masked.reshape(masked.shape[0], masked.shape[1], 1)
-                masked_img = np.concatenate([masked_img, masked], axis=2)
-        return masked_img
-    
+        return img_grid/255., mask_grid
     
     def get_all_grid(self):
         """ get all grid indices by img size and grid size
@@ -422,11 +393,6 @@ class VCID_Dataset(Dataset):
         self.flatten_grid = flatten_grid
         return self.flatten_grid
     
-    def channel_shuffle(self, img):
-        img = img.transpose(2, 0, 1)
-        np.random.shuffle(img)
-        return img.transpose(1, 2, 0)
-
     def __len__(self):
         return len(self.flatten_grid)
 
@@ -437,13 +403,10 @@ class VCID_Dataset(Dataset):
         grid_idx = img_grid_idx[1:]
         # get img & surface_vol
         mask = self.imgs[img_idx]
-        surface_vol = self.surface_vols[img_idx]
-        # mask = self.get_grid_img(mask, grid_idx)/255.
-        # surface_vol = self.get_grid_img(surface_vol, grid_idx)/255.
-        mask, surface_vol = self.get_grid_img_and_mask(mask, surface_vol, grid_idx)
+        img = self.oof_preds[img_idx]
+        mask, img = self.get_grid_img_and_mask(mask, img, grid_idx)
         # multiple small mask 
-        assert surface_vol.shape[0]==mask.shape[0] and surface_vol.shape[1]==mask.shape[1] , "surface_vol_list shape is not same as img shape"
-        img = surface_vol
+        assert img.shape[0]==mask.shape[0] and img.shape[1]==mask.shape[1] , "oofpred shape is not same as img shape"
         # transform
         if self.mode == "test":
             if self.transform:
@@ -463,45 +426,30 @@ class VCID_Dataset(Dataset):
                 img = transformed["image"]
                 label = transformed["mask"]
                 label = label.permute(2, 0, 1)/255. # (channel, h, w)
-                # label = TF.resize(img=label, size=(self.img_size[0]//2, self.img_size[1]//2))
             else:
                 img = img.transpose(2, 0, 1) # (channel, h, w)
                 label = label.transpose(2, 0, 1)/255. # (channel, h, w){}
                 img = torch.tensor(img, dtype=torch.float32)
                 label = torch.tensor(label, dtype=torch.float32)
-                # label = TF.resize(img=label, size=(self.img_size[0]//2, self.img_size[1]//2))
             assert img is not None and label is not None, f"img or label is None {img} {label}, {img_idx}, {grid_idx}, {self.rand_pos}"
             return img, label, grid_idx
 
-"""
-Loss
-"""
-ALPHA = 0.1 # < 0.5 penalises FP more, > 0.5 penalises FN more
-CE_RATIO = 0.90 #weighted contribution of modified CE loss compared to Dice loss
-class ComboLoss(nn.Module):
-    def __init__(self, weight=None, size_average=True):
-        super(ComboLoss, self).__init__()
 
-    def forward(self, inputs, targets, smooth=1, alpha=ALPHA, eps=1e-9):
-        
-        #flatten label and prediction tensors
-        inputs = inputs.view(-1)
-        targets = targets.view(-1)
-        
-        #True Positives, False Positives & False Negatives
-        intersection = (inputs * targets).sum()    
-        dice = (2. * intersection + smooth) / (inputs.sum() + targets.sum() + smooth)
-        
-        inputs = torch.clamp(inputs, eps, 1.0 - eps)       
-        out = - (ALPHA * ((targets * torch.log(inputs)) + ((1 - ALPHA) * (1.0 - targets) * torch.log(1.0 - inputs))))
-        weighted_ce = out.mean(-1)
-        # if dice is None or dice > 0:
-        #     combo = weighted_ce
-        # else:
-        #     combo = (CE_RATIO * weighted_ce) - ((1 - CE_RATIO) * dice)
-        combo = (CE_RATIO * weighted_ce) - ((1 - CE_RATIO) * dice)
-        assert combo is not None, f"combo loss is None, weighted_ce: {weighted_ce}, dice: {dice}"
-        return combo
+
+# valid_dirs = CFG["VALID_DIR_LIST"][0]
+# print("dataset")
+# dataset = VCID_Dataset(CFG, valid_dirs, CFG["pred_names"], mode="train", transform=train_transforms)
+# print("dataloader")
+# dataloader_notrans = DataLoader(dataset, 4, shuffle=False, num_workers=0)
+
+# imshow_batch = 10
+# for batch_idx, (imgs, labels, grid_idx) in enumerate(dataloader_notrans):
+#     print(imgs.shape)
+#     print(labels.shape)
+#     if batch_idx == imshow_batch:
+#         break
+
+# raise Exception("stop")    
 
 
 def train_fn(train_loader, model, criterion, epoch ,optimizer, scheduler, CFG):
@@ -619,26 +567,19 @@ def save_and_plot_oof(mode, fold, slice_idx, valid_preds_img, valid_targets_img,
 
 def get_tta_aug(aug_type):
     if aug_type=="default":
-        return A.Compose([
-            A.Resize(CFG["input_img_size"][0], CFG["input_img_size"][1]),
-            ToTensorV2(),])
+        return A.Compose([ToTensorV2(),])
     elif aug_type=="hflip":
         return A.Compose([
-            A.Resize(CFG["input_img_size"][0], CFG["input_img_size"][1]),
             A.HorizontalFlip(p=1.0),
             ToTensorV2(),
         ])
     elif aug_type=="vflip":
         return A.Compose([
-            A.Resize(CFG["input_img_size"][0], CFG["input_img_size"][1]), 
             A.VerticalFlip(p=1.0),
             ToTensorV2(),
         ])
     else:
-        return A.Compose([
-            A.Resize(CFG["input_img_size"][0], CFG["input_img_size"][1]),
-            ToTensorV2(),
-            ])
+        return A.Compose([ToTensorV2(),])
       
 def training_loop(CFG):
     best_score_list = []
@@ -657,7 +598,8 @@ def training_loop(CFG):
         criterion = torch.nn.BCEWithLogitsLoss(pos_weight=weights)
         # criterion = torch.nn.BCEWithLogitsLoss()
         optimizer = AdamW(model.parameters(), lr=CFG["lr"], weight_decay=CFG["weight_decay"], amsgrad=False)
-        scheduler = CosineAnnealingLR(optimizer, T_max=CFG["T_max"], eta_min=CFG["min_lr"], last_epoch=-1)
+        # scheduler = CosineAnnealingLR(optimizer, T_max=CFG["T_max"], eta_min=CFG["min_lr"], last_epoch=-1)
+        scheduler = ExponentialLR(optimizer, gamma=CFG["gamma"], last_epoch=-1)
         
         # training
         best_score = -np.inf
@@ -669,69 +611,58 @@ def training_loop(CFG):
         best_epoch = -1
         best_auc_epoch = -1
         valid_slice_ave = None       
-        for slice_idx, surface_list in enumerate(CFG["SURFACE_LIST"]):
-            LOGGER.info(f"surface_list: {surface_list}")
-            # separate train/valid data 
-            train_dirs = CFG["TRAIN_DIR_LIST"][fold]
-            valid_dirs = CFG["VALID_DIR_LIST"][fold]
-            train_dataset = VCID_Dataset(CFG, train_dirs, surface_list, mode="train", transform=train_transforms)
-            valid_dataset = VCID_Dataset(CFG, valid_dirs, surface_list, mode="valid", transform=valid_transforms)
-            train_loader = DataLoader(train_dataset, batch_size=CFG["batch_size"], shuffle = True,
-                                        num_workers = CFG["num_workers"], pin_memory = True)
-            valid_loader = DataLoader(valid_dataset, batch_size=CFG["batch_size"], shuffle = False,
-                                        num_workers = CFG["num_workers"], pin_memory = True)
-            for epoch in range(1, CFG["n_epoch"] + 1):
-                epochs_ = epoch + CFG["n_epoch"] * slice_idx
-                LOGGER.info(f'- epoch:{epochs_} -')
-                train_loss_avg = train_fn(train_loader, model, criterion, epochs_ ,optimizer, scheduler, CFG)
-                valid_targets, valid_preds, valid_grid_idx, valid_loss_avg = valid_fn(model, valid_loader, CFG, criterion)
-                
-                # target, predをconcatして元のサイズに戻す
-                valid_preds_img, valid_targets_img  = concat_grid_img(valid_preds, valid_targets, valid_grid_idx, valid_dirs, CFG)
-                valid_score, valid_threshold, auc, dice_list = calc_cv(valid_targets_img, valid_preds_img)
-                valid_preds_binary = (valid_preds_img > valid_threshold).astype(np.uint8)
-                
-                elapsed = time.time() - start_time
-                LOGGER.info(f"\t epoch:{epochs_}, avg train loss:{train_loss_avg:.4f}, avg valid loss:{valid_loss_avg:.4f}")
-                LOGGER.info(f"\t score:{valid_score:.4f}(th={valid_threshold:3f}), auc={auc:4f}::: time:{elapsed:.2f}s")
-                if not CFG["DEBUG"]:
-                    logging_metrics_epoch(CFG, fold, epoch, slice_idx, train_loss_avg, valid_loss_avg, valid_score, valid_threshold, auc)
-                scheduler.step()
-                # validationスコアがbestを更新したらモデルを保存する
-                if valid_score > best_score:
-                    best_epoch = epochs_
-                    best_valloss = valid_loss_avg
-                    best_score = valid_score
-                    best_threshold = valid_threshold
-                    model_name = CFG["model_name"]
-                    model_path = os.path.join(CFG["OUTPUT_DIR"], f'{model_name}_fold{fold}.pth')
-                    torch.save(model.state_dict(), model_path) 
-                    LOGGER.info(f'Epoch {epochs_} - Save Best Score: {best_score:.4f}. Model is saved.')
-                    LOGGER.info(f"dice_list: {dice_list}")
-                
-                if auc > best_auc:
-                    best_auc = auc
-                    best_auc_epoch = epochs_
-                    best_auc_valloss = valid_loss_avg
-                    model_name = CFG["model_name"]
-                    model_path = os.path.join(CFG["OUTPUT_DIR"], f'{model_name}_auc_fold{fold}.pth')
-                    torch.save(model.state_dict(), model_path) 
-                    LOGGER.info(f'Epoch {epochs_} - Save Best AUC: {best_auc:.4f}. Model is saved.')
-
-            # valid_img_slice.append(valid_preds_img)
-            if valid_slice_ave is None:
-                valid_slice_ave = valid_preds_img
-            else:
-                valid_slice_ave += valid_preds_img
-        valid_slice_ave /= len(CFG["SURFACE_LIST"])
-        valid_sliceave_score, valid_sliceave_threshold, ave_auc, dice_list = calc_cv(valid_targets_img, valid_slice_ave)
+        # separate train/valid data 
+        train_dirs = CFG["TRAIN_DIR_LIST"][fold]
+        valid_dirs = CFG["VALID_DIR_LIST"][fold]
+        train_dataset = VCID_Dataset(CFG, train_dirs, CFG["pred_names"], mode="train", transform=train_transforms)
+        valid_dataset = VCID_Dataset(CFG, valid_dirs, CFG["pred_names"], mode="valid", transform=valid_transforms)
+        train_loader = DataLoader(train_dataset, batch_size=CFG["batch_size"], shuffle = True,
+                                    num_workers = CFG["num_workers"], pin_memory = True)
+        valid_loader = DataLoader(valid_dataset, batch_size=CFG["batch_size"], shuffle = False,
+                                    num_workers = CFG["num_workers"], pin_memory = True)
+        for epoch in range(1, CFG["n_epoch"] + 1):
+            epochs_ = epoch
+            LOGGER.info(f'- epoch:{epochs_} -')
+            train_loss_avg = train_fn(train_loader, model, criterion, epochs_ ,optimizer, scheduler, CFG)
+            valid_targets, valid_preds, valid_grid_idx, valid_loss_avg = valid_fn(model, valid_loader, CFG, criterion)
+            
+            # target, predをconcatして元のサイズに戻す
+            valid_preds_img, valid_targets_img  = concat_grid_img(valid_preds, valid_targets, valid_grid_idx, valid_dirs, CFG)
+            valid_score, valid_threshold, auc, dice_list = calc_cv(valid_targets_img, valid_preds_img)
+            valid_preds_binary = (valid_preds_img > valid_threshold).astype(np.uint8)
+            
+            elapsed = time.time() - start_time
+            LOGGER.info(f"\t epoch:{epochs_}, avg train loss:{train_loss_avg:.4f}, avg valid loss:{valid_loss_avg:.4f}")
+            LOGGER.info(f"\t score:{valid_score:.4f}(th={valid_threshold:3f}), auc={auc:4f}::: time:{elapsed:.2f}s")
+            if not CFG["DEBUG"]:
+                logging_metrics_epoch(CFG, fold, epoch, 0, train_loss_avg, valid_loss_avg, valid_score, valid_threshold, auc)
+            scheduler.step()
+            # validationスコアがbestを更新したらモデルを保存する
+            if valid_score > best_score:
+                best_epoch = epochs_
+                best_valloss = valid_loss_avg
+                best_score = valid_score
+                best_threshold = valid_threshold
+                LOGGER.info(f'Epoch {epochs_} - Save Best Score: {best_score:.4f}. Model is saved.')
+                LOGGER.info(f"dice_list: {dice_list}")
+            
+            if auc > best_auc:
+                best_auc = auc
+                best_auc_epoch = epochs_
+                best_auc_valloss = valid_loss_avg
+                model_name = CFG["model_name"]
+                model_path = os.path.join(CFG["OUTPUT_DIR"], f'stacking_fold{fold}.pth')
+                torch.save(model.state_dict(), model_path) 
+                LOGGER.info(f'Epoch {epochs_} - Save Best AUC: {best_auc:.4f}. Model is saved.')
+                valid_auc_img = valid_preds_img.copy()
+        valid_sliceave_score, valid_sliceave_threshold, ave_auc, dice_list = calc_cv(valid_targets_img, valid_auc_img)
         
         slice_ave_score_list.append(valid_sliceave_score)
         slice_ave_auc_list.append(ave_auc)
         slice_ave_score_threshold_list.append(valid_sliceave_threshold)
  
-        valid_slice_binary = (valid_slice_ave > valid_sliceave_threshold).astype(np.uint8)
-        save_and_plot_oof("average", fold, 999, valid_slice_ave, valid_targets_img, valid_slice_binary, CFG)
+        valid_slice_binary = (valid_auc_img > valid_sliceave_threshold).astype(np.uint8)
+        save_and_plot_oof("average", fold, 999, valid_auc_img, valid_targets_img, valid_slice_binary, CFG)
         LOGGER.info(f'[fold{fold}] slice ave score:{valid_sliceave_score:.4f}(th={valid_sliceave_threshold:3f}), auc={ave_auc:4f}')
         LOGGER.info(f'[fold{fold}] BEST Epoch {best_epoch} - Save Best Score:{best_score:.4f}. Best loss:{best_valloss:.4f}')
         LOGGER.info(f'[fold{fold}] BEST AUC Epoch {best_auc_epoch} - Save Best Score:{best_auc:.4f}. Best loss:{best_auc_valloss:.4f}')
@@ -750,7 +681,8 @@ def training_loop(CFG):
 
 
 def slide_inference_tta(CFG):
-    tta_list = ["defalt", "hflip", "vflip"]
+    # tta_list = ["defalt", "hflip", "vflip"]
+    tta_list = ["defalt"]
     start_time = time.time()
     slice_ave_score_list, slice_ave_auc_list, slice_ave_score_threshold_list = [], [], []
     for fold in CFG["folds"]:
@@ -759,43 +691,38 @@ def slide_inference_tta(CFG):
         # set model & learning fn
         model = SegModel(CFG)
         # model_path = os.path.join(CFG["OUTPUT_DIR"], f'{CFG["model_name"]}_fold{fold}.pth')
-        model_path = os.path.join(CFG["OUTPUT_DIR"], f'{CFG["model_name"]}_auc_fold{fold}.pth')
+        model_path = os.path.join(CFG["OUTPUT_DIR"], f'stacking_fold{fold}.pth')
         model.load_state_dict(torch.load(model_path))
         model = model.to(device)
         valid_img_slice = None
-        for slice_idx, surface_list in enumerate(CFG["SURFACE_LIST"]):
-            LOGGER.info(f"surface_list:{surface_list}")
-            surface_volumes = None
-            for slide_pos in CFG["slide_pos_list"]:
-                LOGGER.info(f"slide pos: {slide_pos}")
-                valid_dirs = CFG["VALID_DIR_LIST"][fold]
-                for tta in tta_list:
-                    valid_transforms = get_tta_aug(tta)
-                    valid_dataset = VCID_Dataset(CFG, valid_dirs, surface_list, surface_volumes, slide_pos, mode="valid", transform=valid_transforms)
-                    surface_volumes = valid_dataset.get_surface_volumes()
-                    valid_loader = DataLoader(valid_dataset, batch_size=CFG["batch_size"], shuffle = False,
-                                                num_workers = CFG["num_workers"], pin_memory = True)
+        for slide_pos in CFG["slide_pos_list"]:
+            LOGGER.info(f"slide pos: {slide_pos}")
+            valid_dirs = CFG["VALID_DIR_LIST"][fold]
+            for tta in tta_list:
+                valid_transforms = get_tta_aug(tta)
+                valid_dataset = VCID_Dataset(CFG, valid_dirs, CFG["pred_names"], slide_pos, mode="valid", transform=valid_transforms)
+                valid_loader = DataLoader(valid_dataset, batch_size=CFG["batch_size"], shuffle = False,
+                                            num_workers = CFG["num_workers"], pin_memory = True)
 
-                    valid_targets, valid_preds, valid_grid_idx = valid_fn(model, valid_loader, CFG)
-                    
-                    # target, predをconcatして元のサイズに戻す
-                    valid_preds_img, valid_targets_img  = concat_grid_img(valid_preds, valid_targets, valid_grid_idx, valid_dirs, CFG, slide_pos, tta)
-                    valid_score, valid_threshold, auc, dice_list = calc_cv(valid_targets_img, valid_preds_img)
-                    valid_preds_binary = (valid_preds_img > valid_threshold).astype(np.uint8)
-                    
-                    elapsed = time.time() - start_time
-                    LOGGER.info(f"\t score:{valid_score:.4f}(th={valid_threshold:3f}), auc={auc:4f}::: time:{elapsed:.2f}s")
-                    # valid_img_slice.append(valid_preds_img)
-                    if valid_img_slice is None:
-                        valid_img_slice = valid_preds_img
-                    else:
-                        valid_img_slice += valid_preds_img
-        valid_img_slice /= (len(CFG["SURFACE_LIST"])*len(CFG["slide_pos_list"])*len(tta_list))
-        
-        # 最後にもう一回blurする
-        valid_img_slice = cv2.GaussianBlur(valid_img_slice, (65, 65), 32)
-        
+                valid_targets, valid_preds, valid_grid_idx = valid_fn(model, valid_loader, CFG)
+                
+                # target, predをconcatして元のサイズに戻す
+                valid_preds_img, valid_targets_img  = concat_grid_img(valid_preds, valid_targets, valid_grid_idx, valid_dirs, CFG, slide_pos, tta)
+                valid_score, valid_threshold, auc, dice_list = calc_cv(valid_targets_img, valid_preds_img)
+                valid_preds_binary = (valid_preds_img > valid_threshold).astype(np.uint8)
+                
+                elapsed = time.time() - start_time
+                LOGGER.info(f"\t score:{valid_score:.4f}(th={valid_threshold:3f}), auc={auc:4f}::: time:{elapsed:.2f}s")
+                # valid_img_slice.append(valid_preds_img)
+                if valid_img_slice is None:
+                    valid_img_slice = valid_preds_img
+                else:
+                    valid_img_slice += valid_preds_img
+        valid_img_slice /= (len(CFG["slide_pos_list"])*len(tta_list))
         valid_sliceave_score, valid_sliceave_threshold, ave_auc, dice_list = calc_cv(valid_targets_img, valid_img_slice)
+        LOGGER.info("with gaussian blur score")
+        valid_img_blur = cv2.GaussianBlur(valid_img_slice, (65, 65), 32)
+        valid_blur_score, valid_slice_blur_threshold, ave_blur_auc, dice_list = calc_cv(valid_targets_img, valid_img_blur)
         
         slice_ave_score_list.append(valid_sliceave_score)
         slice_ave_auc_list.append(ave_auc)
@@ -803,8 +730,8 @@ def slide_inference_tta(CFG):
 
         valid_slice_binary = (valid_img_slice > valid_sliceave_threshold).astype(np.uint8)
         save_and_plot_oof("average", fold, 555, valid_img_slice, valid_targets_img, valid_slice_binary, CFG)
-        LOGGER.info(f'[fold{fold}] slice ave score:{valid_sliceave_score:.4f}(th={valid_sliceave_threshold:3f}), auc={ave_auc:4f}')
-         
+        LOGGER.info(f'[fold{fold}] slice ave score:{valid_sliceave_score:.4f}(th={valid_sliceave_threshold:3f}), auc={ave_auc:4f}') 
+        LOGGER.info(f'[fold{fold}] slice ave score(blur):{valid_blur_score:.4f}(th={valid_slice_blur_threshold:3f}), auc={ave_blur_auc:4f}')
         del model, valid_loader, valid_dataset, valid_preds_img, valid_targets_img, valid_preds_binary
         gc.collect()
         torch.cuda.empty_cache()

@@ -24,7 +24,8 @@ from torch.utils.data import DataLoader, Dataset
 
 # training
 from torch.optim import SGD, Adam, AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR, CosineAnnealingWarmRestarts, ReduceLROnPlateau, ExponentialLR, CyclicLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, CosineAnnealingWarmRestarts,  \
+                                        ReduceLROnPlateau, ExponentialLR, CyclicLR, MultiStepLR
 
 # metric
 from sklearn.metrics import fbeta_score, roc_auc_score
@@ -37,7 +38,7 @@ warnings.filterwarnings('ignore')
 Configureations
 """
 DEBUG = False 
-EXP_NAME = "exp104"
+EXP_NAME = "exp109"
 EXP_YAML_PAHT = os.path.join("/working", "output", EXP_NAME, "Config.yaml")
 # read yaml file to CFG
 with open(EXP_YAML_PAHT) as yaml_file:
@@ -48,10 +49,10 @@ CFG["EXP_NAME"] = EXP_NAME
 CFG["DEBUG"] = DEBUG
 CFG["OUTPUT_DIR"] = os.path.join("/working", "output", EXP_NAME)
 
-CFG["SUMMARY"] = f"{EXP_NAME}: add train augmentation"
+CFG["SUMMARY"] = f"{EXP_NAME}: effnet b6. add train augmentation."
 
 if DEBUG:
-    CFG["n_epoch"] = 1
+    CFG["n_epoch"] = 15
     CFG["folds"] = [0]
     CFG["SURFACE_LIST"] = [[25, 28, 31, 34]]
     CFG["slide_pos_list"] = [[0,0]]
@@ -209,6 +210,7 @@ class Decoder(nn.Module):
         self.UpConv_1 = UpConv(CFG["channel_nums"][1]*2, CFG["channel_nums"][2])
         self.UpConv_2 = UpConv(CFG["channel_nums"][2]*2, CFG["channel_nums"][3])
         self.UpConv_3 = UpConv(CFG["channel_nums"][3]*2, CFG["channel_nums"][4])
+        self.UpConv_4 = UpConv(CFG["channel_nums"][4]*2, CFG["channel_nums"][4])
     
     def forward(self, skip_connection_list):
         emb = self.UpConv_0(skip_connection_list[-1])
@@ -223,7 +225,8 @@ class Decoder(nn.Module):
         emb = self.UpConv_3(emb_cat)
         emb_cat = torch.cat([skip_connection_list[-5], emb], dim = 1)
         
-        return emb_cat
+        emb = self.UpConv_4(emb_cat)
+        return emb
 
 class SegModel(nn.Module):
     def __init__(self, CFG):
@@ -231,7 +234,7 @@ class SegModel(nn.Module):
         self.encoder = Encoder(CFG)
         self.decoder = Decoder(CFG)
         self.head = nn.Sequential(
-            nn.Conv2d(CFG["channel_nums"][-1]*2, CFG["out_channels"], kernel_size=1, stride=1, padding=0),
+            nn.Conv2d(CFG["channel_nums"][-1], CFG["out_channels"], kernel_size=1, stride=1, padding=0),
         )
     def forward(self, img):
         skip_connection_list = self.encoder(img)
@@ -241,7 +244,7 @@ class SegModel(nn.Module):
 
 
 # model = SegModel(CFG)
-# x = torch.randn(1, 2*CFG["inp_channels"], 512, 512)
+# x = torch.randn(1, CFG["inp_channels"], 256, 256)
 # print(x.shape)
 # out = model(x)
 # print(out.shape)
@@ -252,12 +255,12 @@ class SegModel(nn.Module):
 transfomrs
 """
 train_transforms = A.Compose([
-    A.HorizontalFlip(p=0.5),
-    A.VerticalFlip(p=0.5),
-    A.RandomRotate90(p=0.5),
-    A.SafeRotate(limit=180, p=0.5),
+    A.HorizontalFlip(p=0.3),
+    A.VerticalFlip(p=0.3),
+    A.Rotate((-180, 180), p=0.3),
     A.RandomCrop(int(CFG["img_size"][0]*0.8), int(CFG["img_size"][1]*0.8), p=0.3),
-    A.Blur(blur_limit=3, p=0.3),
+    A.Blur(blur_limit=3, p=0.2),
+    A.MultiplicativeNoise(multiplier=(0.9, 1.1), p=0.3),
     A.Resize(CFG["input_img_size"][0], CFG["input_img_size"][1]),
     ToTensorV2(),
 ])
@@ -271,7 +274,7 @@ valid_transforms = A.Compose([
 Dataset
 """
 class VCID_Dataset(Dataset):
-    def __init__(self, CFG, data_dir_list, surface_list, surface_volumes=None, slide_pos=[0,0], mode="train", transform=None):
+    def __init__(self, CFG, data_dir_list, surface_list, surface_volumes=None, slide_pos=[0,0], rot90_num=0, mode="train", transform=None):
         # get config
         self.mode = mode
         self.RANDOM_SLIDE = CFG["RANDOM_SLIDE"]
@@ -283,6 +286,7 @@ class VCID_Dataset(Dataset):
         self.surface_list = surface_list
         self.slide_pos = slide_pos
         self.transform = transform
+        self.rot90_num = rot90_num
         # self.cleha = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
         # get imgs
         # print("initializing dataset...")
@@ -366,6 +370,8 @@ class VCID_Dataset(Dataset):
                         (grid_idx[1]*self.img_size[1]) + self.slide_pos[1] + rand_pos[1] : ((grid_idx[1]+1)*self.img_size[1]) + self.slide_pos[1] + rand_pos[1]]
         mask_grid = mask[(grid_idx[0]*self.img_size[0]) + self.slide_pos[0] + rand_pos[0] : ((grid_idx[0]+1)*self.img_size[0]) + self.slide_pos[0] + rand_pos[0],
                          (grid_idx[1]*self.img_size[1]) + self.slide_pos[1] + rand_pos[1] : ((grid_idx[1]+1)*self.img_size[1]) + self.slide_pos[1] + rand_pos[1]]
+        img_grid = np.rot90(img_grid, k=self.rot90_num)
+        mask_grid = np.rot90(mask_grid, k=self.rot90_num)
         return img_grid/255., mask_grid/255.
     
     def get_masked_img(self, img, mask):
@@ -586,7 +592,7 @@ def valid_fn(model, valid_loader, CFG, criterion=None):
     else:
         return test_targets, test_preds, test_grid_idx, losses.avg
 
-def concat_grid_img(img_list, label_list, grid_idx_list, valid_dir_list, CFG, slide_pos=[0,0], tta="default"):
+def concat_grid_img(img_list, label_list, grid_idx_list, valid_dir_list, CFG, slide_pos=[0,0], rot90_num=0, tta="default"):
     # concat pred img and label to original size
     label_path = os.path.join(CFG["TRAIN_DIR"], valid_dir_list[0], "inklabels.png")
     label_img = cv2.imread(label_path, cv2.IMREAD_GRAYSCALE)
@@ -596,6 +602,7 @@ def concat_grid_img(img_list, label_list, grid_idx_list, valid_dir_list, CFG, sl
     for img_idx, grid_idx in enumerate(grid_idx_list):
         img_ = img_list[img_idx]
         img_ = cv2.resize(img_, dsize=(CFG["img_size"][0], CFG["img_size"][1]))
+        img_ = np.rot90(img_, -rot90_num)
         img_ = img_[:, :, np.newaxis]
         if tta=="default":
             pred_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
@@ -609,7 +616,7 @@ def concat_grid_img(img_list, label_list, grid_idx_list, valid_dir_list, CFG, sl
         else:
             pred_img[grid_idx[0]*CFG["img_size"][0]+slide_pos[0] : (grid_idx[0]+1)*CFG["img_size"][0]+slide_pos[0],
                     grid_idx[1]*CFG["img_size"][1]+slide_pos[1] : (grid_idx[1]+1)*CFG["img_size"][1]+slide_pos[1], :] += img_
-        
+
     return pred_img, label_img
 
 
@@ -658,7 +665,7 @@ def training_loop(CFG):
         # criterion = torch.nn.BCEWithLogitsLoss()
         optimizer = AdamW(model.parameters(), lr=CFG["lr"], weight_decay=CFG["weight_decay"], amsgrad=False)
         scheduler = CosineAnnealingLR(optimizer, T_max=CFG["T_max"], eta_min=CFG["min_lr"], last_epoch=-1)
-        
+        # scheduler = MultiStepLR(optimizer, milestones=[CFG["n_epoch"]*2, CFG["n_epoch"]*4, CFG["n_epoch"]*6], gamma=CFG["gamma"])
         # training
         best_score = -np.inf
         best_auc = -np.inf
@@ -668,62 +675,65 @@ def training_loop(CFG):
         start_time = time.time()
         best_epoch = -1
         best_auc_epoch = -1
-        valid_slice_ave = None       
-        for slice_idx, surface_list in enumerate(CFG["SURFACE_LIST"]):
-            LOGGER.info(f"surface_list: {surface_list}")
-            # separate train/valid data 
-            train_dirs = CFG["TRAIN_DIR_LIST"][fold]
-            valid_dirs = CFG["VALID_DIR_LIST"][fold]
-            train_dataset = VCID_Dataset(CFG, train_dirs, surface_list, mode="train", transform=train_transforms)
-            valid_dataset = VCID_Dataset(CFG, valid_dirs, surface_list, mode="valid", transform=valid_transforms)
-            train_loader = DataLoader(train_dataset, batch_size=CFG["batch_size"], shuffle = True,
-                                        num_workers = CFG["num_workers"], pin_memory = True)
-            valid_loader = DataLoader(valid_dataset, batch_size=CFG["batch_size"], shuffle = False,
-                                        num_workers = CFG["num_workers"], pin_memory = True)
-            for epoch in range(1, CFG["n_epoch"] + 1):
-                epochs_ = epoch + CFG["n_epoch"] * slice_idx
-                LOGGER.info(f'- epoch:{epochs_} -')
-                train_loss_avg = train_fn(train_loader, model, criterion, epochs_ ,optimizer, scheduler, CFG)
-                valid_targets, valid_preds, valid_grid_idx, valid_loss_avg = valid_fn(model, valid_loader, CFG, criterion)
-                
-                # target, predをconcatして元のサイズに戻す
-                valid_preds_img, valid_targets_img  = concat_grid_img(valid_preds, valid_targets, valid_grid_idx, valid_dirs, CFG)
-                valid_score, valid_threshold, auc, dice_list = calc_cv(valid_targets_img, valid_preds_img)
-                valid_preds_binary = (valid_preds_img > valid_threshold).astype(np.uint8)
-                
-                elapsed = time.time() - start_time
-                LOGGER.info(f"\t epoch:{epochs_}, avg train loss:{train_loss_avg:.4f}, avg valid loss:{valid_loss_avg:.4f}")
-                LOGGER.info(f"\t score:{valid_score:.4f}(th={valid_threshold:3f}), auc={auc:4f}::: time:{elapsed:.2f}s")
-                if not CFG["DEBUG"]:
-                    logging_metrics_epoch(CFG, fold, epoch, slice_idx, train_loss_avg, valid_loss_avg, valid_score, valid_threshold, auc)
-                scheduler.step()
-                # validationスコアがbestを更新したらモデルを保存する
-                if valid_score > best_score:
-                    best_epoch = epochs_
-                    best_valloss = valid_loss_avg
-                    best_score = valid_score
-                    best_threshold = valid_threshold
-                    model_name = CFG["model_name"]
-                    model_path = os.path.join(CFG["OUTPUT_DIR"], f'{model_name}_fold{fold}.pth')
-                    torch.save(model.state_dict(), model_path) 
-                    LOGGER.info(f'Epoch {epochs_} - Save Best Score: {best_score:.4f}. Model is saved.')
-                    LOGGER.info(f"dice_list: {dice_list}")
-                
-                if auc > best_auc:
-                    best_auc = auc
-                    best_auc_epoch = epochs_
-                    best_auc_valloss = valid_loss_avg
-                    model_name = CFG["model_name"]
-                    model_path = os.path.join(CFG["OUTPUT_DIR"], f'{model_name}_auc_fold{fold}.pth')
-                    torch.save(model.state_dict(), model_path) 
-                    LOGGER.info(f'Epoch {epochs_} - Save Best AUC: {best_auc:.4f}. Model is saved.')
-
+        valid_slice_ave = None
+        epochs_ = 1  
+        for rot_idx, rot_num in enumerate(CFG["rot90_num"]):
+            LOGGER.info(f"rot_num: {rot_num}")
+            for slice_idx, surface_list in enumerate(CFG["TRAIN_SURFACE_LIST"]):
+                LOGGER.info(f"surface_list: {surface_list}")
+                # separate train/valid data 
+                train_dirs = CFG["TRAIN_DIR_LIST"][fold]
+                valid_dirs = CFG["VALID_DIR_LIST"][fold]
+                train_dataset = VCID_Dataset(CFG, train_dirs, surface_list, rot90_num=rot_num, mode="train", transform=train_transforms)
+                valid_dataset = VCID_Dataset(CFG, valid_dirs, surface_list, rot90_num=rot_num, mode="valid", transform=valid_transforms)
+                train_loader = DataLoader(train_dataset, batch_size=CFG["batch_size"], shuffle = True,
+                                            num_workers = CFG["num_workers"], pin_memory = True)
+                valid_loader = DataLoader(valid_dataset, batch_size=CFG["batch_size"], shuffle = False,
+                                            num_workers = CFG["num_workers"], pin_memory = True)
+                for epoch in range(1, CFG["n_epoch"] + 1):
+                    # epochs_ = epoch + CFG["n_epoch"] * (slice_idx + rot_idx)
+                    LOGGER.info(f'- epoch:{epochs_} -')
+                    train_loss_avg = train_fn(train_loader, model, criterion, epochs_ ,optimizer, scheduler, CFG)
+                    valid_targets, valid_preds, valid_grid_idx, valid_loss_avg = valid_fn(model, valid_loader, CFG, criterion)
+                    
+                    # target, predをconcatして元のサイズに戻す
+                    valid_preds_img, valid_targets_img  = concat_grid_img(valid_preds, valid_targets, valid_grid_idx, valid_dirs, CFG, rot90_num=rot_num)
+                    valid_score, valid_threshold, auc, dice_list = calc_cv(valid_targets_img, valid_preds_img)
+                    valid_preds_binary = (valid_preds_img > valid_threshold).astype(np.uint8)
+                    
+                    elapsed = time.time() - start_time
+                    LOGGER.info(f"\t epoch:{epochs_}, avg train loss:{train_loss_avg:.4f}, avg valid loss:{valid_loss_avg:.4f}")
+                    LOGGER.info(f"\t score:{valid_score:.4f}(th={valid_threshold:3f}), auc={auc:4f}::: time:{elapsed:.2f}s")
+                    if not CFG["DEBUG"]:
+                        logging_metrics_epoch(CFG, fold, epochs_, slice_idx, train_loss_avg, valid_loss_avg, valid_score, valid_threshold, auc)
+                    scheduler.step()
+                    # validationスコアがbestを更新したらモデルを保存する
+                    if valid_score > best_score:
+                        best_epoch = epochs_
+                        best_valloss = valid_loss_avg
+                        best_score = valid_score
+                        best_threshold = valid_threshold
+                        model_name = CFG["model_name"]
+                        model_path = os.path.join(CFG["OUTPUT_DIR"], f'{model_name}_fold{fold}.pth')
+                        torch.save(model.state_dict(), model_path) 
+                        LOGGER.info(f'Epoch {epochs_} - Save Best Score: {best_score:.4f}. Model is saved.')
+                        LOGGER.info(f"dice_list: {dice_list}")
+                    
+                    if auc > best_auc:
+                        best_auc = auc
+                        best_auc_epoch = epochs_
+                        best_auc_valloss = valid_loss_avg
+                        model_name = CFG["model_name"]
+                        model_path = os.path.join(CFG["OUTPUT_DIR"], f'{model_name}_auc_fold{fold}.pth')
+                        torch.save(model.state_dict(), model_path) 
+                        LOGGER.info(f'Epoch {epochs_} - Save Best AUC: {best_auc:.4f}. Model is saved.')
+                    epochs_ += 1
             # valid_img_slice.append(valid_preds_img)
             if valid_slice_ave is None:
                 valid_slice_ave = valid_preds_img
             else:
                 valid_slice_ave += valid_preds_img
-        valid_slice_ave /= len(CFG["SURFACE_LIST"])
+        valid_slice_ave /= (len(CFG["SURFACE_LIST"])*len(CFG["rot90_num"]))
         valid_sliceave_score, valid_sliceave_threshold, ave_auc, dice_list = calc_cv(valid_targets_img, valid_slice_ave)
         
         slice_ave_score_list.append(valid_sliceave_score)
@@ -735,7 +745,10 @@ def training_loop(CFG):
         LOGGER.info(f'[fold{fold}] slice ave score:{valid_sliceave_score:.4f}(th={valid_sliceave_threshold:3f}), auc={ave_auc:4f}')
         LOGGER.info(f'[fold{fold}] BEST Epoch {best_epoch} - Save Best Score:{best_score:.4f}. Best loss:{best_valloss:.4f}')
         LOGGER.info(f'[fold{fold}] BEST AUC Epoch {best_auc_epoch} - Save Best Score:{best_auc:.4f}. Best loss:{best_auc_valloss:.4f}')
-        
+        model_name = CFG["model_name"]
+        model_path = os.path.join(CFG["OUTPUT_DIR"], f'final_weights_fold{fold}.pth')
+        torch.save(model.state_dict(), model_path) 
+                        
         best_score_list.append(best_score)
         best_threshold_list.append(best_threshold)
         best_epoch_list.append(best_epoch)
@@ -763,34 +776,36 @@ def slide_inference_tta(CFG):
         model.load_state_dict(torch.load(model_path))
         model = model.to(device)
         valid_img_slice = None
-        for slice_idx, surface_list in enumerate(CFG["SURFACE_LIST"]):
-            LOGGER.info(f"surface_list:{surface_list}")
-            surface_volumes = None
-            for slide_pos in CFG["slide_pos_list"]:
-                LOGGER.info(f"slide pos: {slide_pos}")
-                valid_dirs = CFG["VALID_DIR_LIST"][fold]
-                for tta in tta_list:
-                    valid_transforms = get_tta_aug(tta)
-                    valid_dataset = VCID_Dataset(CFG, valid_dirs, surface_list, surface_volumes, slide_pos, mode="valid", transform=valid_transforms)
-                    surface_volumes = valid_dataset.get_surface_volumes()
-                    valid_loader = DataLoader(valid_dataset, batch_size=CFG["batch_size"], shuffle = False,
-                                                num_workers = CFG["num_workers"], pin_memory = True)
+        for rot_num in CFG["rot90_num"]:
+            LOGGER.info(f"rot_num:{rot_num}")
+            for slice_idx, surface_list in enumerate(CFG["SURFACE_LIST"][-3:]):
+                LOGGER.info(f"surface_list:{surface_list}")
+                surface_volumes = None
+                for slide_pos in CFG["slide_pos_list"]:
+                    LOGGER.info(f"slide pos: {slide_pos}")
+                    valid_dirs = CFG["VALID_DIR_LIST"][fold]
+                    for tta in tta_list:
+                        valid_transforms = get_tta_aug(tta)
+                        valid_dataset = VCID_Dataset(CFG, valid_dirs, surface_list, surface_volumes, slide_pos, mode="valid", transform=valid_transforms)
+                        surface_volumes = valid_dataset.get_surface_volumes()
+                        valid_loader = DataLoader(valid_dataset, batch_size=CFG["batch_size"], shuffle = False,
+                                                    num_workers = CFG["num_workers"], pin_memory = True)
 
-                    valid_targets, valid_preds, valid_grid_idx = valid_fn(model, valid_loader, CFG)
-                    
-                    # target, predをconcatして元のサイズに戻す
-                    valid_preds_img, valid_targets_img  = concat_grid_img(valid_preds, valid_targets, valid_grid_idx, valid_dirs, CFG, slide_pos, tta)
-                    valid_score, valid_threshold, auc, dice_list = calc_cv(valid_targets_img, valid_preds_img)
-                    valid_preds_binary = (valid_preds_img > valid_threshold).astype(np.uint8)
-                    
-                    elapsed = time.time() - start_time
-                    LOGGER.info(f"\t score:{valid_score:.4f}(th={valid_threshold:3f}), auc={auc:4f}::: time:{elapsed:.2f}s")
-                    # valid_img_slice.append(valid_preds_img)
-                    if valid_img_slice is None:
-                        valid_img_slice = valid_preds_img
-                    else:
-                        valid_img_slice += valid_preds_img
-        valid_img_slice /= (len(CFG["SURFACE_LIST"])*len(CFG["slide_pos_list"])*len(tta_list))
+                        valid_targets, valid_preds, valid_grid_idx = valid_fn(model, valid_loader, CFG)
+                        
+                        # target, predをconcatして元のサイズに戻す
+                        valid_preds_img, valid_targets_img  = concat_grid_img(valid_preds, valid_targets, valid_grid_idx, valid_dirs, CFG, slide_pos, rot_num, tta)
+                        valid_score, valid_threshold, auc, dice_list = calc_cv(valid_targets_img, valid_preds_img)
+                        valid_preds_binary = (valid_preds_img > valid_threshold).astype(np.uint8)
+                        
+                        elapsed = time.time() - start_time
+                        LOGGER.info(f"\t score:{valid_score:.4f}(th={valid_threshold:3f}), auc={auc:4f}::: time:{elapsed:.2f}s")
+                        # valid_img_slice.append(valid_preds_img)
+                        if valid_img_slice is None:
+                            valid_img_slice = valid_preds_img
+                        else:
+                            valid_img_slice += valid_preds_img
+        valid_img_slice /= (len(CFG["rot90_num"])*len(CFG["SURFACE_LIST"])*len(CFG["slide_pos_list"])*len(tta_list))
         
         # 最後にもう一回blurする
         valid_img_slice = cv2.GaussianBlur(valid_img_slice, (65, 65), 32)

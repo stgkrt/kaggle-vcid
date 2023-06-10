@@ -24,7 +24,8 @@ from torch.utils.data import DataLoader, Dataset
 
 # training
 from torch.optim import SGD, Adam, AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR, CosineAnnealingWarmRestarts, ReduceLROnPlateau, ExponentialLR, CyclicLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, CosineAnnealingWarmRestarts,  \
+                                        ReduceLROnPlateau, ExponentialLR, CyclicLR, MultiStepLR
 
 # metric
 from sklearn.metrics import fbeta_score, roc_auc_score
@@ -37,7 +38,7 @@ warnings.filterwarnings('ignore')
 Configureations
 """
 DEBUG = False 
-EXP_NAME = "exp104"
+EXP_NAME = "exp105"
 EXP_YAML_PAHT = os.path.join("/working", "output", EXP_NAME, "Config.yaml")
 # read yaml file to CFG
 with open(EXP_YAML_PAHT) as yaml_file:
@@ -48,10 +49,10 @@ CFG["EXP_NAME"] = EXP_NAME
 CFG["DEBUG"] = DEBUG
 CFG["OUTPUT_DIR"] = os.path.join("/working", "output", EXP_NAME)
 
-CFG["SUMMARY"] = f"{EXP_NAME}: add train augmentation"
+CFG["SUMMARY"] = f"{EXP_NAME}: effnet b6. add train augmentation."
 
 if DEBUG:
-    CFG["n_epoch"] = 1
+    CFG["n_epoch"] = 15
     CFG["folds"] = [0]
     CFG["SURFACE_LIST"] = [[25, 28, 31, 34]]
     CFG["slide_pos_list"] = [[0,0]]
@@ -209,6 +210,7 @@ class Decoder(nn.Module):
         self.UpConv_1 = UpConv(CFG["channel_nums"][1]*2, CFG["channel_nums"][2])
         self.UpConv_2 = UpConv(CFG["channel_nums"][2]*2, CFG["channel_nums"][3])
         self.UpConv_3 = UpConv(CFG["channel_nums"][3]*2, CFG["channel_nums"][4])
+        self.UpConv_4 = UpConv(CFG["channel_nums"][4]*2, CFG["channel_nums"][4])
     
     def forward(self, skip_connection_list):
         emb = self.UpConv_0(skip_connection_list[-1])
@@ -223,7 +225,8 @@ class Decoder(nn.Module):
         emb = self.UpConv_3(emb_cat)
         emb_cat = torch.cat([skip_connection_list[-5], emb], dim = 1)
         
-        return emb_cat
+        emb = self.UpConv_4(emb_cat)
+        return emb
 
 class SegModel(nn.Module):
     def __init__(self, CFG):
@@ -231,7 +234,7 @@ class SegModel(nn.Module):
         self.encoder = Encoder(CFG)
         self.decoder = Decoder(CFG)
         self.head = nn.Sequential(
-            nn.Conv2d(CFG["channel_nums"][-1]*2, CFG["out_channels"], kernel_size=1, stride=1, padding=0),
+            nn.Conv2d(CFG["channel_nums"][-1], CFG["out_channels"], kernel_size=1, stride=1, padding=0),
         )
     def forward(self, img):
         skip_connection_list = self.encoder(img)
@@ -241,7 +244,7 @@ class SegModel(nn.Module):
 
 
 # model = SegModel(CFG)
-# x = torch.randn(1, 2*CFG["inp_channels"], 512, 512)
+# x = torch.randn(1, CFG["inp_channels"], 256, 256)
 # print(x.shape)
 # out = model(x)
 # print(out.shape)
@@ -252,12 +255,11 @@ class SegModel(nn.Module):
 transfomrs
 """
 train_transforms = A.Compose([
-    A.HorizontalFlip(p=0.5),
-    A.VerticalFlip(p=0.5),
-    A.RandomRotate90(p=0.5),
-    A.SafeRotate(limit=180, p=0.5),
+    A.HorizontalFlip(p=0.3),
+    A.VerticalFlip(p=0.3),
+    A.Rotate((-180, 180), p=0.3),
     A.RandomCrop(int(CFG["img_size"][0]*0.8), int(CFG["img_size"][1]*0.8), p=0.3),
-    A.Blur(blur_limit=3, p=0.3),
+    A.Blur(blur_limit=3, p=0.1),
     A.Resize(CFG["input_img_size"][0], CFG["input_img_size"][1]),
     ToTensorV2(),
 ])
@@ -657,8 +659,8 @@ def training_loop(CFG):
         criterion = torch.nn.BCEWithLogitsLoss(pos_weight=weights)
         # criterion = torch.nn.BCEWithLogitsLoss()
         optimizer = AdamW(model.parameters(), lr=CFG["lr"], weight_decay=CFG["weight_decay"], amsgrad=False)
-        scheduler = CosineAnnealingLR(optimizer, T_max=CFG["T_max"], eta_min=CFG["min_lr"], last_epoch=-1)
-        
+        # scheduler = CosineAnnealingLR(optimizer, T_max=CFG["T_max"], eta_min=CFG["min_lr"], last_epoch=-1)
+        scheduler = MultiStepLR(optimizer, milestones=[CFG["n_epoch"], CFG["n_epoch"]*2, CFG["n_epoch"]*3], gamma=CFG["gamma"])
         # training
         best_score = -np.inf
         best_auc = -np.inf
