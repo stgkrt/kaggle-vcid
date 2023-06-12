@@ -38,7 +38,7 @@ warnings.filterwarnings('ignore')
 Configureations
 """
 DEBUG = False 
-EXP_NAME = "exp110"
+EXP_NAME = "exp111"
 EXP_YAML_PAHT = os.path.join("/working", "output", EXP_NAME, "Config.yaml")
 # read yaml file to CFG
 with open(EXP_YAML_PAHT) as yaml_file:
@@ -283,6 +283,7 @@ class VCID_Dataset(Dataset):
         self.data_dir_list = data_dir_list
         self.surface_list = surface_list
         self.slide_pos = slide_pos
+        self.rand_pos = [0, 0]
         self.transform = transform
         self.rot90_num = rot90_num
         # self.cleha = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
@@ -350,8 +351,10 @@ class VCID_Dataset(Dataset):
 
     def get_grid_img(self, img, grid_idx):
         """ crop grid img from original img"""
-        img_grid = img[(grid_idx[0]*self.img_size[0]) + self.slide_pos[0] : ((grid_idx[0]+1)*self.img_size[0]) + self.slide_pos[0],
-                        (grid_idx[1]*self.img_size[1]) + self.slide_pos[1] : ((grid_idx[1]+1)*self.img_size[1]) + self.slide_pos[1]]
+        img_grid = img[(grid_idx[0]*self.img_size[0]) + self.slide_pos[0] + self.rand_pos[0] : 
+                        ((grid_idx[0]+1)*self.img_size[0]) + self.slide_pos[0] + self.rand_pos[0],
+                        (grid_idx[1]*self.img_size[1]) + self.slide_pos[1] + self.rand_pos[1] :
+                        ((grid_idx[1]+1)*self.img_size[1]) + self.slide_pos[1] + self.rand_pos[1]]
         return img_grid
     
     def get_grid_img_and_mask(self, img, mask, grid_idx):
@@ -650,13 +653,12 @@ def training_loop(CFG):
     slice_ave_score_list = []
     slice_ave_auc_list = []
     slice_ave_score_threshold_list = []
-    CFG["n_epoch"] = 5
     for fold in CFG["folds"]:
         LOGGER.info(f"-- fold{fold} training start --") 
-        if fold != 4:
-            continue
         # set model & learning fn
         model = SegModel(CFG)
+        model_path = os.path.join("/working/output/exp110", f'{CFG["model_name"]}_auc_fold{fold}.pth')# 再学習させる
+        model.load_state_dict(torch.load(model_path))
         model = model.to(device)
         valid_img_slice = []
         weights = torch.tensor([0.3]).cuda()
@@ -788,7 +790,7 @@ def slide_inference_tta(CFG):
                     valid_dirs = CFG["VALID_DIR_LIST"][fold]
                     for tta in tta_list:
                         valid_transforms = get_tta_aug(tta)
-                        valid_dataset = VCID_Dataset(CFG, valid_dirs, surface_list, surface_volumes, slide_pos, rot90_num=rot_num, mode="valid", transform=valid_transforms)
+                        valid_dataset = VCID_Dataset(CFG, valid_dirs, surface_list, surface_volumes, slide_pos, rot90_num=rot_num,mode="valid", transform=valid_transforms)
                         surface_volumes = valid_dataset.get_surface_volumes()
                         valid_loader = DataLoader(valid_dataset, batch_size=CFG["batch_size"], shuffle = False,
                                                     num_workers = CFG["num_workers"], pin_memory = True)
@@ -833,7 +835,8 @@ def oof_score_check(CFG):
     pred_flatten_list = []
     mask_flatten_list = []
     for fold in CFG["folds"]:
-        pred_path = os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_average_slice555_valid_pred_img.png")
+        # pred_path = os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_average_slice555_rot4_valid_pred_img.png")
+        pred_path = os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_oofpred.png")
         # mask_path = os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_average_slice555_valid_targets_img.png")
         valid_dirs = CFG["VALID_DIR_LIST"][fold]
         mask_path = os.path.join(CFG["TRAIN_DIR"], valid_dirs[0], "inklabels.png")
