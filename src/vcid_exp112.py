@@ -38,7 +38,7 @@ warnings.filterwarnings('ignore')
 Configureations
 """
 DEBUG = False 
-EXP_NAME = "exp111"
+EXP_NAME = "exp112"
 EXP_YAML_PAHT = os.path.join("/working", "output", EXP_NAME, "Config.yaml")
 # read yaml file to CFG
 with open(EXP_YAML_PAHT) as yaml_file:
@@ -253,12 +253,11 @@ class SegModel(nn.Module):
 transfomrs
 """
 train_transforms = A.Compose([
-    A.HorizontalFlip(p=0.3),
-    A.VerticalFlip(p=0.3),
-    A.Rotate((-180, 180), p=0.3),
-    A.RandomCrop(int(CFG["img_size"][0]*0.8), int(CFG["img_size"][1]*0.8), p=0.3),
-    A.Blur(blur_limit=3, p=0.2),
-    A.MultiplicativeNoise(multiplier=(0.9, 1.1), p=0.3),
+    A.HorizontalFlip(p=0.2),
+    A.VerticalFlip(p=0.2),
+    A.RandomCrop(int(CFG["img_size"][0]*0.8), int(CFG["img_size"][1]*0.8), p=0.2),
+    # A.Blur(blur_limit=3, p=0.1),
+    A.MultiplicativeNoise(multiplier=(0.9, 1.1), p=0.1),
     A.Resize(CFG["input_img_size"][0], CFG["input_img_size"][1]),
     ToTensorV2(),
 ])
@@ -667,8 +666,6 @@ def training_loop(CFG):
         LOGGER.info(f"-- fold{fold} training start --") 
         # set model & learning fn
         model = SegModel(CFG)
-        model_path = os.path.join("/working/output/exp110", f'{CFG["model_name"]}_auc_fold{fold}.pth')# 再学習させる
-        model.load_state_dict(torch.load(model_path))
         model = model.to(device)
         valid_img_slice = []
         weights = torch.tensor([0.3]).cuda()
@@ -688,10 +685,11 @@ def training_loop(CFG):
         best_auc_epoch = -1
         valid_slice_ave = None
         epochs_ = 1  
-        for rot_idx, rot_num in enumerate(CFG["rot90_num"]):
-            LOGGER.info(f"rot_num: {rot_num}")
-            for slice_idx, surface_list in enumerate(CFG["TRAIN_SURFACE_LIST"]):
-                LOGGER.info(f"surface_list: {surface_list}")
+        
+        for slice_idx, surface_list in enumerate(CFG["TRAIN_SURFACE_LIST"]):
+            LOGGER.info(f"surface_list: {surface_list}")
+            for rot_idx, rot_num in enumerate(CFG["rot90_num"]):
+                LOGGER.info(f"rot_num: {rot_num}")
                 # separate train/valid data 
                 train_dirs = CFG["TRAIN_DIR_LIST"][fold]
                 valid_dirs = CFG["VALID_DIR_LIST"][fold]
@@ -729,7 +727,7 @@ def training_loop(CFG):
                         torch.save(model.state_dict(), model_path) 
                         LOGGER.info(f'Epoch {epochs_} - Save Best Score: {best_score:.4f}. Model is saved.')
                         LOGGER.info(f"dice_list: {dice_list}")
-                        save_and_plot_oof("fbeta", fold, slice_idx, rot_num, valid_preds_img, valid_targets_img, valid_preds_binary, CFG)
+                        # save_and_plot_oof("fbeta", fold, slice_idx, rot_num, valid_preds_img, valid_targets_img, valid_preds_binary, CFG)
                     
                     if auc > best_auc:
                         best_auc = auc
@@ -739,7 +737,7 @@ def training_loop(CFG):
                         model_path = os.path.join(CFG["OUTPUT_DIR"], f'{model_name}_auc_fold{fold}.pth')
                         torch.save(model.state_dict(), model_path) 
                         LOGGER.info(f'Epoch {epochs_} - Save Best AUC: {best_auc:.4f}. Model is saved.')
-                        save_and_plot_oof("auc", fold, slice_idx, rot_num, valid_preds_img, valid_targets_img, valid_preds_binary, CFG)
+                        # save_and_plot_oof("auc", fold, slice_idx, rot_num, valid_preds_img, valid_targets_img, valid_preds_binary, CFG)
                     epochs_ += 1
             # valid_img_slice.append(valid_preds_img)
             if valid_slice_ave is None:
@@ -883,7 +881,7 @@ if __name__=="__main__":
         os.environ["WANDB_SILENT"] = "true"
         wandb.init(project=WANDB_CONFIG["competition"], config=CFG, group=CFG["EXP_CATEGORY"], name=CFG["EXP_NAME"], reinit=True)
 
-    # best_score_list, best_threshold_list, best_epoch_list = training_loop(CFG)
+    best_score_list, best_threshold_list, best_epoch_list = training_loop(CFG)
     slice_ave_score_list, slice_ave_auc_list, slice_ave_score_threshold_list = slide_inference_tta(CFG)
     
     

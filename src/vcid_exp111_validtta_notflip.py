@@ -631,7 +631,7 @@ def concat_grid_img(img_list, label_list, grid_idx_list, valid_dir_list, CFG, sl
 def save_and_plot_oof(mode, fold, slice_idx, rot_num, valid_preds_img, valid_targets_img, valid_preds_binary, CFG):
     cv2.imwrite(os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_{mode}_slice{slice_idx}_rot{rot_num}_valid_pred_img.png"), valid_preds_img*255)
     # cv2.imwrite(os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_{mode}_slice{slice_idx}_rot{rot_num}_valid_target_img.png"), valid_targets_img*255)
-    cv2.imwrite(os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_oofpred.png"), valid_preds_img*255)
+    cv2.imwrite(os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_notflip_oofpred.png"), valid_preds_img*255)
 
 def get_tta_aug(aug_type):
     if aug_type=="default":
@@ -777,12 +777,12 @@ def training_loop(CFG):
 
 
 def slide_inference_tta(CFG):
-    tta_list = ["defalt", "hflip", "vflip"]
+    # tta_list = ["defalt", "hflip", "vflip"]
+    tta_list = ["defalt"]
     start_time = time.time()
     slice_ave_score_list, slice_ave_auc_list, slice_ave_score_threshold_list = [], [], []
     for fold in CFG["folds"]:
         LOGGER.info(f"-- fold{fold} slide inference start --")
- 
         # set model & learning fn
         model = SegModel(CFG)
         # model_path = os.path.join(CFG["OUTPUT_DIR"], f'{CFG["model_name"]}_fold{fold}.pth')
@@ -846,7 +846,7 @@ def oof_score_check(CFG):
     mask_flatten_list = []
     for fold in CFG["folds"]:
         # pred_path = os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_average_slice555_rot4_valid_pred_img.png")
-        pred_path = os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_oofpred.png")
+        pred_path = os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_notflip_oofpred.png")
         # mask_path = os.path.join(CFG["OUTPUT_DIR"], "imgs", f"fold{fold}_average_slice555_valid_targets_img.png")
         valid_dirs = CFG["VALID_DIR_LIST"][fold]
         mask_path = os.path.join(CFG["TRAIN_DIR"], valid_dirs[0], "inklabels.png")
