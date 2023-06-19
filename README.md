@@ -1,2 +1,2 @@
 # kaggle VCID
-kaggle Competition (VCID)[https://www.kaggle.com/competitions/vesuvius-challenge-ink-detection] 
+kaggle Competition [VCID](https://www.kaggle.com/competitions/vesuvius-challenge-ink-detection)
